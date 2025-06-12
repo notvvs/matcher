@@ -4,7 +4,7 @@ from collections import defaultdict
 
 
 class ConfigurableTermExtractor:
-    """Экстрактор с конфигурационными файлами"""
+    """Экстрактор с оптимальной логикой для тендеров"""
 
     def __init__(self, config_dir="config"):
         self.config_dir = config_dir
@@ -32,7 +32,6 @@ class ConfigurableTermExtractor:
             with open(filepath, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    # Пропускаем комментарии и пустые строки
                     if line and not line.startswith('#'):
                         config_set.add(line.lower())
 
@@ -58,12 +57,11 @@ class ConfigurableTermExtractor:
                     line = line.strip()
                     if line and not line.startswith('#') and ',' in line:
                         synonyms = [s.strip().lower() for s in line.split(',')]
-                        # Каждое слово связываем со всеми синонимами
                         for word in synonyms:
                             if word not in synonyms_dict:
                                 synonyms_dict[word] = set()
                             synonyms_dict[word].update(synonyms)
-                            synonyms_dict[word].discard(word)  # Убираем само слово
+                            synonyms_dict[word].discard(word)
 
             return synonyms_dict
 
@@ -72,34 +70,32 @@ class ConfigurableTermExtractor:
             return {}
 
     def is_stop_word(self, word):
-        """Проверяем, является ли слово стоп-словом"""
+        """Проверяем стоп-слово"""
         return word.lower() in self.stop_words
 
     def is_important_characteristic(self, word):
-        """Проверяем, важная ли это характеристика"""
+        """Проверяем важную характеристику"""
         word_lower = word.lower()
         return any(important in word_lower for important in self.important_chars)
 
     def get_synonyms(self, word):
-        """Получаем синонимы для слова"""
+        """Получаем синонимы"""
         return list(self.synonyms_dict.get(word.lower(), []))
 
     def expand_with_synonyms(self, words):
-        """Расширяем список слов синонимами"""
+        """Расширяем синонимами"""
         expanded = set(words)
-
         for word in words:
             synonyms = self.get_synonyms(word)
             expanded.update(synonyms)
-
         return list(expanded)
 
     def extract_from_tender(self, tender_item):
-        """ГЛАВНАЯ ФУНКЦИЯ: извлечение терминов"""
+        """ГЛАВНАЯ ФУНКЦИЯ с оптимальной логикой"""
 
         tender_name = tender_item.get('name', 'Без названия')
-        print(f"🔧 Анализ тендера: {tender_name}")
-        print("-" * 50)
+        print(f"🎯 ОПТИМАЛЬНЫЙ анализ тендера: {tender_name}")
+        print("-" * 60)
 
         # 1. Извлекаем сырые термины
         raw_terms = self._extract_raw_terms(tender_item)
@@ -110,8 +106,8 @@ class ConfigurableTermExtractor:
         # 3. Расширяем синонимами
         expanded = self._expand_classified_terms(classified)
 
-        # 4. Формируем финальный результат
-        result = self._build_final_result(expanded, tender_item)
+        # 4. ПРИМЕНЯЕМ ОПТИМАЛЬНУЮ ЛОГИКУ ВЕСОВ
+        result = self._build_optimal_tender_weights(expanded, tender_item)
 
         return result
 
@@ -124,7 +120,7 @@ class ConfigurableTermExtractor:
             'all_text': ''
         }
 
-        # Из названия тендера
+        # Из названия
         tender_name = tender_item.get('name', '')
         if tender_name:
             terms['name_terms'] = self._clean_and_filter_words(tender_name)
@@ -147,24 +143,19 @@ class ConfigurableTermExtractor:
                     char_value_words = self._clean_and_filter_words(str(char_value))
                     terms['char_values'].extend(char_value_words)
 
-        # Статистика
-        print(f"🔍 Сырые термины:")
-        print(f"   - Название: {len(terms['name_terms'])}")
-        print(f"   - Названия характеристик: {len(terms['char_names'])}")
-        print(f"   - Значения характеристик: {len(terms['char_values'])}")
+        print(f"🔍 Сырые термины: название={len(terms['name_terms'])}, "
+              f"хар-ки={len(terms['char_names'])}, значения={len(terms['char_values'])}")
 
         return terms
 
     def _clean_and_filter_words(self, text):
-        """Очистка и фильтрация слов"""
+        """Очистка и фильтрация"""
         if not text:
             return []
 
-        # Убираем пунктуацию и лишние символы
         text_clean = re.sub(r'[^\w\s]', ' ', text.lower())
         words = text_clean.split()
 
-        # Фильтруем
         filtered = []
         for word in words:
             if (len(word) > 2 and
@@ -182,114 +173,177 @@ class ConfigurableTermExtractor:
         return any(indicator in value_str for indicator in range_indicators)
 
     def _classify_terms(self, raw_terms):
-        """Классификация терминов по важности"""
+        """Классификация"""
         classified = {
-            'primary': raw_terms['name_terms'][:3],  # Из названия - самые важные
-            'secondary': [],  # Значения характеристик - важные
-            'tertiary': []  # Названия характеристик - менее важные
+            'primary': raw_terms['name_terms'][:3],
+            'secondary': [],
+            'tertiary': []
         }
 
-        # Значения характеристик
         for value in raw_terms['char_values']:
             if value not in ['нет', 'да', 'без', 'наличие', 'отсутствие']:
                 classified['secondary'].append(value)
 
-        # Важные названия характеристик
         for char_name in raw_terms['char_names']:
             if self.is_important_characteristic(char_name):
                 classified['tertiary'].append(char_name)
 
-        print(f"📊 Классификация:")
-        print(f"   - Primary (название): {len(classified['primary'])}")
-        print(f"   - Secondary (значения): {len(classified['secondary'])}")
-        print(f"   - Tertiary (характеристики): {len(classified['tertiary'])}")
+        print(f"📊 Классификация: Primary={len(classified['primary'])}, "
+              f"Secondary={len(classified['secondary'])}, Tertiary={len(classified['tertiary'])}")
 
         return classified
 
     def _expand_classified_terms(self, classified):
-        """Расширяем каждую группу синонимами"""
+        """Расширяем синонимами"""
         expanded = {}
 
         for category, terms in classified.items():
             original_count = len(terms)
             expanded[category] = self.expand_with_synonyms(terms)
             new_count = len(expanded[category])
-            print(f"📈 {category}: {original_count} → {new_count} (добавлено {new_count - original_count} синонимов)")
+            print(f"📈 {category}: {original_count} → {new_count} (+{new_count - original_count} синонимов)")
 
         return expanded
 
-    def _build_final_result(self, expanded, tender_item):
-        """Формируем финальный результат"""
+    def _build_optimal_tender_weights(self, expanded, tender_item):
+        """🎯 ОПТИМАЛЬНАЯ ЛОГИКА ВЕСОВ ДЛЯ ТЕНДЕРОВ"""
+
         result = {
             'search_query': '',
             'boost_terms': {},
+            'must_match_terms': [],
             'all_terms': [],
             'debug_info': {}
         }
 
-        # Основной поисковый запрос
+        # 1. ОСНОВНОЙ ПОИСКОВЫЙ ЗАПРОС - ОБЯЗАТЕЛЬНЫЙ
         if expanded['primary']:
-            result['search_query'] = ' '.join(expanded['primary'][:3])
+            result['search_query'] = ' '.join(expanded['primary'][:2])  # Только 2 главных слова
+            result['must_match_terms'] = expanded['primary'][:3]
 
-            # Термины с весами
-        weight_mapping = {
-            'primary': 3.0,  # Самый высокий вес
-            'secondary': 2.0,  # Высокий вес
-            'tertiary': 1.0  # Средний вес
+        # 2. АНАЛИЗИРУЕМ ХАРАКТЕРИСТИКИ ТЕНДЕРА
+        characteristics = tender_item.get('characteristics', [])
+        required_chars = [c for c in characteristics if c.get('required', False)]
+        optional_chars = [c for c in characteristics if not c.get('required', False)]
+
+        print(f"📋 Характеристики: обязательных={len(required_chars)}, опциональных={len(optional_chars)}")
+
+        # 3. ОБЯЗАТЕЛЬНЫЕ ХАРАКТЕРИСТИКИ - МАКСИМАЛЬНЫЙ ВЕС
+        required_values = []
+        for char in required_chars:
+            char_value = char.get('value', '')
+            if char_value and not self._is_range_value(char_value):
+                clean_values = self._clean_and_filter_words(str(char_value))
+                required_values.extend(clean_values)
+
+        # Значения ОБЯЗАТЕЛЬНЫХ характеристик получают максимальные веса
+        for i, term in enumerate(required_values[:5]):
+            if term in expanded['secondary']:
+                weight = 4.0 - (i * 0.2)  # 4.0, 3.8, 3.6, 3.4, 3.2
+                result['boost_terms'][term] = weight
+
+        # 4. ОПЦИОНАЛЬНЫЕ ХАРАКТЕРИСТИКИ - ВЫСОКИЙ ВЕС
+        optional_values = []
+        for char in optional_chars:
+            char_value = char.get('value', '')
+            if char_value and not self._is_range_value(char_value):
+                clean_values = self._clean_and_filter_words(str(char_value))
+                optional_values.extend(clean_values)
+
+        for i, term in enumerate(optional_values[:3]):
+            if term in expanded['secondary'] and term not in result['boost_terms']:
+                weight = 2.5 - (i * 0.3)  # 2.5, 2.2, 1.9
+                result['boost_terms'][term] = weight
+
+        # 5. НАЗВАНИЯ ВАЖНЫХ ХАРАКТЕРИСТИК - СРЕДНИЙ ВЕС
+        important_char_names = []
+        for char in required_chars[:3]:
+            char_name = char.get('name', '')
+            if char_name:
+                clean_names = self._clean_and_filter_words(char_name)
+                important_char_names.extend(clean_names)
+
+        for i, term in enumerate(important_char_names[:4]):
+            if term in expanded['tertiary'] and term not in result['boost_terms']:
+                weight = 1.8 - (i * 0.2)  # 1.8, 1.6, 1.4, 1.2
+                result['boost_terms'][term] = weight
+
+        # 6. СИНОНИМЫ ПОЛУЧАЮТ ПОНИЖЕННЫЙ ВЕС
+        original_terms = set()
+        original_terms.update(self._clean_and_filter_words(tender_item.get('name', '')))
+        for char in characteristics:
+            original_terms.update(self._clean_and_filter_words(char.get('name', '')))
+            original_terms.update(self._clean_and_filter_words(str(char.get('value', ''))))
+
+        # Снижаем вес синонимов
+        synonym_count = 0
+        for term, weight in list(result['boost_terms'].items()):
+            if term not in original_terms:  # Это синоним
+                result['boost_terms'][term] = round(weight * 0.7, 2)  # Снижаем на 30%
+                synonym_count += 1
+
+        # 7. АНТИ-ШУМОВЫЕ МЕХАНИЗМЫ
+        original_count = len(result['boost_terms'])
+        result['boost_terms'] = {
+            term: weight for term, weight in result['boost_terms'].items()
+            if weight >= 1.0
         }
+        removed_count = original_count - len(result['boost_terms'])
 
-        for category, terms in expanded.items():
-            base_weight = weight_mapping.get(category, 1.0)
-            for i, term in enumerate(terms[:5]):  # Максимум 5 терминов на категорию
-                weight = base_weight - (i * 0.1)  # Постепенно снижаем вес
-                if weight > 0.5:  # Минимальный вес
-                    result['boost_terms'][term] = round(weight, 2)
-
-        # Все термины для дальнейшего использования
+        # 8. ВСЕ ТЕРМИНЫ
         for terms in expanded.values():
             result['all_terms'].extend(terms)
-        result['all_terms'] = list(set(result['all_terms']))  # Убираем дубли
+        result['all_terms'] = list(set(result['all_terms']))
 
-        # Отладочная информация
+        # 9. ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
         result['debug_info'] = {
             'tender_name': tender_item.get('name', ''),
-            'characteristics_count': len(tender_item.get('characteristics', [])),
-            'primary_terms': expanded['primary'][:3],
-            'secondary_terms': expanded['secondary'][:5],
-            'tertiary_terms': expanded['tertiary'][:3],
-            'total_boost_terms': len(result['boost_terms']),
-            'total_all_terms': len(result['all_terms'])
+            'required_characteristics': len(required_chars),
+            'optional_characteristics': len(optional_chars),
+            'must_match_terms': result['must_match_terms'],
+            'boost_terms_count': len(result['boost_terms']),
+            'synonyms_penalized': synonym_count,
+            'low_weight_removed': removed_count,
+            'weight_ranges': {
+                'required_values': '4.0 → 3.2',
+                'optional_values': '2.5 → 1.9',
+                'char_names': '1.8 → 1.2',
+                'synonym_penalty': '-30%'
+            }
         }
 
-        print(f"✅ ФИНАЛЬНЫЙ РЕЗУЛЬТАТ:")
-        print(f"   - Поисковый запрос: '{result['search_query']}'")
-        print(f"   - Термины с весами: {len(result['boost_terms'])}")
-        print(f"   - Всего уникальных терминов: {len(result['all_terms'])}")
+        print(f"🎯 ОПТИМАЛЬНЫЙ РЕЗУЛЬТАТ:")
+        print(f"   - Основной запрос: '{result['search_query']}'")
+        print(f"   - Обязательные термины: {result['must_match_terms']}")
+        print(f"   - Boost терминов: {len(result['boost_terms'])}")
+        print(f"   - Синонимов с пониженным весом: {synonym_count}")
+        print(f"   - Убрано шумовых терминов: {removed_count}")
 
         return result
 
 
-# Тестирование
-def test_extractor():
-    """Тест экстрактора"""
+# Тест
+def test_optimal_extractor():
+    """Тест оптимального экстрактора"""
     extractor = ConfigurableTermExtractor()
 
     test_tender = {
         "name": "Блоки для записей",
         "characteristics": [
-            {"name": "Цвет бумаги", "value": "Пастельный"},
-            {"name": "Тип", "value": "С клейким краем"},
-            {"name": "Количество листов в блоке", "value": "≥ 100"}
+            {"name": "Цвет бумаги", "value": "Пастельный", "required": True},
+            {"name": "Тип", "value": "С клейким краем", "required": True},
+            {"name": "Количество листов в блоке", "value": "≥ 100", "required": False}
         ]
     }
 
     result = extractor.extract_from_tender(test_tender)
 
-    print(f"\n🎯 ТЕСТОВЫЙ РЕЗУЛЬТАТ:")
-    print(f"Запрос: {result['search_query']}")
+    print(f"\n🎯 ОПТИМАЛЬНЫЙ ТЕСТ:")
+    print(f"Запрос: '{result['search_query']}'")
+    print(f"Обязательные: {result['must_match_terms']}")
     print(f"Boost terms: {result['boost_terms']}")
-    print(f"Debug: {result['debug_info']}")
+    print(f"Debug info: {result['debug_info']}")
 
 
 if __name__ == "__main__":
-    test_extractor()
+    test_optimal_extractor()
