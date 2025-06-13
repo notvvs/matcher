@@ -2,16 +2,18 @@ import os
 import re
 from collections import defaultdict
 
+from config.settings import settings
+
 
 class ConfigurableTermExtractor:
     """Экстрактор с оптимальной логикой для тендеров"""
 
-    def __init__(self, config_dir="config"):
-        self.config_dir = config_dir
+    def __init__(self, config_dir=None):
+        self.config_dir = config_dir or settings.CONFIG_DIR
 
         # Загружаем конфигурации
-        self.stop_words = self._load_config_file("C:/Users/ruzik/PycharmProjects/work/matcher/config/stopwords.txt")
-        self.important_chars = self._load_config_file("C:/Users/ruzik/PycharmProjects/work/matcher/config/important_chars.txt")
+        self.stop_words = self._load_config_file(settings.STOPWORDS_FILE)
+        self.important_chars = self._load_config_file(settings.IMPORTANT_CHARS_FILE)
         self.synonyms_dict = self._load_synonyms()
 
         print(f"✅ Конфигурация загружена:")
@@ -44,7 +46,7 @@ class ConfigurableTermExtractor:
 
     def _load_synonyms(self):
         """Загружаем синонимы"""
-        filepath = "C:/Users/ruzik/PycharmProjects/work/matcher/config/synonyms.txt"
+        filepath = os.path.join(self.config_dir, settings.SYNONYMS_FILE)
         synonyms_dict = {}
 
         if not os.path.exists(filepath):
@@ -237,9 +239,10 @@ class ConfigurableTermExtractor:
                 required_values.extend(clean_values)
 
         # Значения ОБЯЗАТЕЛЬНЫХ характеристик получают максимальные веса
-        for i, term in enumerate(required_values[:5]):
+        weights_config = settings.WEIGHTS['required_values']
+        for i, term in enumerate(required_values[:weights_config['count']]):
             if term in expanded['secondary']:
-                weight = 4.0 - (i * 0.2)  # 4.0, 3.8, 3.6, 3.4, 3.2
+                weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
 
         # 4. ОПЦИОНАЛЬНЫЕ ХАРАКТЕРИСТИКИ - ВЫСОКИЙ ВЕС
@@ -250,9 +253,10 @@ class ConfigurableTermExtractor:
                 clean_values = self._clean_and_filter_words(str(char_value))
                 optional_values.extend(clean_values)
 
-        for i, term in enumerate(optional_values[:3]):
+        weights_config = settings.WEIGHTS['optional_values']
+        for i, term in enumerate(optional_values[:weights_config['count']]):
             if term in expanded['secondary'] and term not in result['boost_terms']:
-                weight = 2.5 - (i * 0.3)  # 2.5, 2.2, 1.9
+                weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
 
         # 5. НАЗВАНИЯ ВАЖНЫХ ХАРАКТЕРИСТИК - СРЕДНИЙ ВЕС
@@ -263,9 +267,10 @@ class ConfigurableTermExtractor:
                 clean_names = self._clean_and_filter_words(char_name)
                 important_char_names.extend(clean_names)
 
-        for i, term in enumerate(important_char_names[:4]):
+        weights_config = settings.WEIGHTS['char_names']
+        for i, term in enumerate(important_char_names[:weights_config['count']]):
             if term in expanded['tertiary'] and term not in result['boost_terms']:
-                weight = 1.8 - (i * 0.2)  # 1.8, 1.6, 1.4, 1.2
+                weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
 
         # 6. СИНОНИМЫ ПОЛУЧАЮТ ПОНИЖЕННЫЙ ВЕС
@@ -277,16 +282,17 @@ class ConfigurableTermExtractor:
 
         # Снижаем вес синонимов
         synonym_count = 0
+        synonym_penalty = settings.WEIGHTS['synonym_penalty']
         for term, weight in list(result['boost_terms'].items()):
             if term not in original_terms:  # Это синоним
-                result['boost_terms'][term] = round(weight * 0.7, 2)  # Снижаем на 30%
+                result['boost_terms'][term] = round(weight * synonym_penalty, 2)
                 synonym_count += 1
 
         # 7. АНТИ-ШУМОВЫЕ МЕХАНИЗМЫ
         original_count = len(result['boost_terms'])
         result['boost_terms'] = {
             term: weight for term, weight in result['boost_terms'].items()
-            if weight >= 1.0
+            if weight >= settings.MIN_WEIGHT_THRESHOLD
         }
         removed_count = original_count - len(result['boost_terms'])
 

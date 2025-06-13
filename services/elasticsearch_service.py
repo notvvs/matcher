@@ -1,25 +1,23 @@
 from elasticsearch import Elasticsearch
 import json
 
+from config.settings import settings
+
 
 class ElasticsearchService:
     """Сервис ES с оптимальными запросами для тендеров"""
 
-    def __init__(self, host="localhost", port=9200):
-        self.host = host
-        self.port = port
+    def __init__(self, host=None, port=None):
+        self.host = host or settings.ELASTICSEARCH_HOST
+        self.port = port or settings.ELASTICSEARCH_PORT
+        self.index_name = settings.ELASTICSEARCH_INDEX
         self.es = None
         self.connect()
 
     def connect(self):
         """Подключение"""
         try:
-            self.es = Elasticsearch(
-                [{"host": self.host, "port": self.port, "scheme": "http"}],
-                verify_certs=False,
-                ssl_show_warn=False,
-                request_timeout=30
-            )
+            self.es = Elasticsearch(**settings.get_elasticsearch_config())
 
             info = self.es.info()
             print(f"✅ ES подключен: {info['version']['number']}")
@@ -35,8 +33,8 @@ class ElasticsearchService:
         if not self.es:
             return {'error': 'ES не подключен'}
 
-        if not self.es.indices.exists(index="ipointer_index"):
-            return {'error': 'Индекс ipointer_index не существует'}
+        if not self.es.indices.exists(index=self.index_name):
+            return {'error': f'Индекс {self.index_name} не существует'}
 
         print(f"🎯 ОПТИМАЛЬНЫЙ ES поиск:")
         print(f"   - Основной запрос: '{search_terms['search_query']}'")
@@ -52,7 +50,7 @@ class ElasticsearchService:
         query['_source'] = ["title", "category", "brand", "attributes"]
 
         try:
-            response = self.es.search(index="ipointer_index", body=query)
+            response = self.es.search(index=self.index_name, body=query)
 
             # Обрабатываем результаты
             candidates = []
@@ -145,6 +143,8 @@ class ElasticsearchService:
         should_clauses = []
 
         # Термины с индивидуальными весами
+        multipliers = settings.WEIGHTS['es_field_multipliers']
+
         for term, weight in search_terms['boost_terms'].items():
             should_clauses.extend([
                 # В названии товара (ВЫСШИЙ приоритет для точных совпадений)
@@ -152,7 +152,7 @@ class ElasticsearchService:
                     "match": {
                         "title": {
                             "query": term,
-                            "boost": weight * 2.5  # Максимальный множитель для названия
+                            "boost": weight * multipliers['title']
                         }
                     }
                 },
@@ -161,7 +161,7 @@ class ElasticsearchService:
                     "match": {
                         "category": {
                             "query": term,
-                            "boost": weight * 1.8
+                            "boost": weight * multipliers['category']
                         }
                     }
                 },
@@ -170,7 +170,7 @@ class ElasticsearchService:
                     "match": {
                         "brand": {
                             "query": term,
-                            "boost": weight * 1.5
+                            "boost": weight * multipliers['brand']
                         }
                     }
                 },
@@ -182,7 +182,7 @@ class ElasticsearchService:
                             "match": {
                                 "attributes.attr_value": {
                                     "query": term,
-                                    "boost": weight * 2.0  # Высокий приоритет для значений
+                                    "boost": weight * multipliers['attr_value']
                                 }
                             }
                         }
@@ -196,7 +196,7 @@ class ElasticsearchService:
                             "match": {
                                 "attributes.attr_name": {
                                     "query": term,
-                                    "boost": weight * 1.0  # Стандартный вес для названий
+                                    "boost": weight * multipliers['attr_name']
                                 }
                             }
                         }
