@@ -1,8 +1,7 @@
 import os
 import re
-from collections import defaultdict
 
-from config.settings import settings
+from app.config.settings import settings
 
 
 class ConfigurableTermExtractor:

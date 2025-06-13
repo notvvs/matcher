@@ -1,7 +1,7 @@
 from elasticsearch import Elasticsearch
 import json
 
-from config.settings import settings
+from app.config.settings import settings
 
 
 class ElasticsearchService:
@@ -68,13 +68,16 @@ class ElasticsearchService:
             result = {
                 'candidates': candidates,
                 'total_found': response['hits']['total']['value'],
-                'max_score': response['hits']['max_score'],
+                'max_score': response['hits']['max_score'] or 0,  # Защита от None
                 'search_terms_used': search_terms,
                 'query_type': 'optimal_tender_search'
             }
 
             print(f"✅ ОПТИМАЛЬНЫЙ результат: {len(candidates)} из {result['total_found']}")
-            print(f"   - Макс. релевантность: {result['max_score']:.2f}")
+            if result['max_score'] > 0:
+                print(f"   - Макс. релевантность: {result['max_score']:.2f}")
+            else:
+                print(f"   - Нет результатов с релевантностью")
 
             return result
 

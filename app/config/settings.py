@@ -26,9 +26,9 @@ class Settings:
 
     # Пути к файлам конфигурации
     CONFIG_DIR = Path(os.getenv('CONFIG_DIR', 'config'))
-    STOPWORDS_FILE = os.getenv('STOPWORDS_FILE', '../data/stopwords.txt')
-    SYNONYMS_FILE = os.getenv('SYNONYMS_FILE', '../data/synonyms.txt')
-    IMPORTANT_CHARS_FILE = os.getenv('IMPORTANT_CHARS_FILE', '../data/important_chars.txt')
+    STOPWORDS_FILE = os.getenv('STOPWORDS_FILE', 'stopwords.txt')
+    SYNONYMS_FILE = os.getenv('SYNONYMS_FILE', 'synonyms.txt')
+    IMPORTANT_CHARS_FILE = os.getenv('IMPORTANT_CHARS_FILE', 'important_chars.txt')
 
     # Настройки поиска
     MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', 2000))
@@ -65,9 +65,14 @@ class Settings:
     }
 
     # Семантический поиск
-    EMBEDDINGS_MODEL = os.getenv('EMBEDDINGS_MODEL', 'sentence-transformers/rubert-tiny2')
+    EMBEDDINGS_MODEL = os.getenv('EMBEDDINGS_MODEL', 'intfloat/multilingual-e5-base')
     SEMANTIC_THRESHOLD = float(os.getenv('SEMANTIC_THRESHOLD', 0.3))
     SEMANTIC_MAX_CANDIDATES = int(os.getenv('SEMANTIC_MAX_CANDIDATES', 500))
+    SEMANTIC_BATCH_SIZE = int(os.getenv('SEMANTIC_BATCH_SIZE', 64))
+
+    # Веса для комбинирования скоров
+    ES_SCORE_WEIGHT = float(os.getenv('ES_SCORE_WEIGHT', 0.4))
+    SEMANTIC_SCORE_WEIGHT = float(os.getenv('SEMANTIC_SCORE_WEIGHT', 0.6))
 
     # Логирование
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
