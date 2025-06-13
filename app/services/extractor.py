@@ -1,5 +1,6 @@
 import os
 import re
+from collections import defaultdict
 
 from app.config.settings import settings
 
@@ -108,7 +109,7 @@ class ConfigurableTermExtractor:
         expanded = self._expand_classified_terms(classified)
 
         # 4. ПРИМЕНЯЕМ ОПТИМАЛЬНУЮ ЛОГИКУ ВЕСОВ
-        result = self._build_optimal_tender_weights(expanded, tender_item)
+        result = self._build_optimal_tender_weights(expanded, tender_item, raw_terms)
 
         return result
 
@@ -206,7 +207,7 @@ class ConfigurableTermExtractor:
 
         return expanded
 
-    def _build_optimal_tender_weights(self, expanded, tender_item):
+    def _build_optimal_tender_weights(self, expanded, tender_item, raw_terms):
         """🎯 ОПТИМАЛЬНАЯ ЛОГИКА ВЕСОВ ДЛЯ ТЕНДЕРОВ"""
 
         result = {
@@ -219,8 +220,11 @@ class ConfigurableTermExtractor:
 
         # 1. ОСНОВНОЙ ПОИСКОВЫЙ ЗАПРОС - ОБЯЗАТЕЛЬНЫЙ
         if expanded['primary']:
-            result['search_query'] = ' '.join(expanded['primary'][:2])  # Только 2 главных слова
-            result['must_match_terms'] = expanded['primary'][:3]
+            # Берем оригинальное название без синонимов для основного запроса
+            original_primary = raw_terms['name_terms'][:2]  # Оригинальные термины без синонимов
+            result['search_query'] = ' '.join(original_primary)
+            # В must_match_terms включаем ВСЕ термины с синонимами
+            result['must_match_terms'] = expanded['primary']
 
         # 2. АНАЛИЗИРУЕМ ХАРАКТЕРИСТИКИ ТЕНДЕРА
         characteristics = tender_item.get('characteristics', [])

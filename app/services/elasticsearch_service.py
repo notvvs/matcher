@@ -38,7 +38,7 @@ class ElasticsearchService:
 
         print(f"🎯 ОПТИМАЛЬНЫЙ ES поиск:")
         print(f"   - Основной запрос: '{search_terms['search_query']}'")
-        print(f"   - Обязательные термины: {search_terms.get('must_match_terms', [])}")
+        print(f"   - Термины для поиска (включая синонимы): {search_terms.get('must_match_terms', [])}")
         print(f"   - Boost терминов: {len(search_terms['boost_terms'])}")
 
         # Строим ОПТИМАЛЬНЫЙ ES запрос
@@ -68,7 +68,7 @@ class ElasticsearchService:
             result = {
                 'candidates': candidates,
                 'total_found': response['hits']['total']['value'],
-                'max_score': response['hits']['max_score'] or 0,  # Защита от None
+                'max_score': response['hits']['max_score'] if response['hits']['max_score'] is not None else 0,
                 'search_terms_used': search_terms,
                 'query_type': 'optimal_tender_search'
             }
@@ -76,8 +76,6 @@ class ElasticsearchService:
             print(f"✅ ОПТИМАЛЬНЫЙ результат: {len(candidates)} из {result['total_found']}")
             if result['max_score'] > 0:
                 print(f"   - Макс. релевантность: {result['max_score']:.2f}")
-            else:
-                print(f"   - Нет результатов с релевантностью")
 
             return result
 
@@ -93,24 +91,29 @@ class ElasticsearchService:
 
         # Основной поисковый запрос ОБЯЗАТЕЛЕН
         if search_terms['search_query']:
+            # Получаем все термины для поиска (включая синонимы)
+            all_search_terms = search_terms.get('must_match_terms', [])
+            if not all_search_terms:
+                all_search_terms = search_terms['search_query'].split()
+
             must_clauses.append({
                 "bool": {
                     "should": [
-                        # Точная фраза в названии
+                        # Точная фраза из оригинального названия
                         {
                             "match_phrase": {
                                 "title": {
                                     "query": search_terms['search_query'],
-                                    "boost": 1.0
+                                    "boost": 2.0  # Выше приоритет для точного совпадения
                                 }
                             }
                         },
-                        # Все слова в названии
+                        # ИЛИ любое из слов/синонимов в названии
                         {
                             "match": {
                                 "title": {
-                                    "query": search_terms['search_query'],
-                                    "operator": "and",  # ВСЕ слова
+                                    "query": ' '.join(all_search_terms),
+                                    "operator": "or",  # ЛЮБОЕ слово, не все
                                     "boost": 1.0
                                 }
                             }
@@ -119,7 +122,8 @@ class ElasticsearchService:
                         {
                             "match": {
                                 "category": {
-                                    "query": search_terms['search_query'],
+                                    "query": ' '.join(all_search_terms),
+                                    "operator": "or",
                                     "boost": 1.0
                                 }
                             }
@@ -130,8 +134,9 @@ class ElasticsearchService:
                                 "path": "attributes",
                                 "query": {
                                     "multi_match": {
-                                        "query": search_terms['search_query'],
-                                        "fields": ["attributes.attr_name", "attributes.attr_value"]
+                                        "query": ' '.join(all_search_terms),
+                                        "fields": ["attributes.attr_name", "attributes.attr_value"],
+                                        "operator": "or"
                                     }
                                 },
                                 "boost": 0.8
