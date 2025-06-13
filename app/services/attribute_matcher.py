@@ -1,17 +1,12 @@
-"""
-Сервис для точного сопоставления характеристик тендера и атрибутов товара
-с умной обработкой категорий
-"""
-
 import re
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from difflib import SequenceMatcher
 from dataclasses import dataclass
-import logging
 from pathlib import Path
 
 from app.config.settings import settings
+from app.utils.logger import setup_logger
 
 
 @dataclass
@@ -29,7 +24,7 @@ class AttributeMatcher:
     """Rule-based матчер для сопоставления характеристик с умной логикой категорий"""
 
     def __init__(self, config_path: str = None):
-        self.logger = logging.getLogger(__name__)
+        self.logger = setup_logger(__name__)
 
         # Загружаем конфигурацию
         self.config_path = config_path or settings.CONFIG_DIR / 'attribute_matching_config.json'
@@ -56,7 +51,7 @@ class AttributeMatcher:
         self.value_mappings = self.config.get('value_mappings', {})
         self.unit_conversions = self.config.get('unit_conversions', {})
 
-        # НОВОЕ: Правила для категорий
+        # Правила для категорий
         self.category_rules = self.config.get('category_rules', {})
         self.smart_matching_enabled = self.config.get('smart_matching_enabled', True)
 
@@ -69,126 +64,34 @@ class AttributeMatcher:
             'smart_fixes': 0  # Сколько раз умная логика помогла
         }
 
+        self.logger.info("AttributeMatcher инициализирован")
+        self.logger.debug(f"Загружено: {len(self.attribute_mappings)} маппингов атрибутов, "
+                         f"{len(self.value_mappings)} маппингов значений, "
+                         f"{len(self.category_rules)} правил категорий")
+
     def _load_config(self) -> Dict[str, Any]:
         """Загружает конфигурацию из файла"""
         try:
             if Path(self.config_path).exists():
                 with open(self.config_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    self.logger.debug(f"Конфигурация загружена из {self.config_path}")
+                    return config
         except Exception as e:
-            self.logger.warning(f"Could not load config: {e}, using defaults")
+            self.logger.warning(f"Не удалось загрузить конфигурацию: {e}, используются значения по умолчанию")
 
-        # Дефолтная конфигурация с умными правилами
+        # Дефолтная конфигурация
         return self._get_default_config()
 
     def _get_default_config(self) -> Dict[str, Any]:
-        """Дефолтная конфигурация с умными правилами для категорий"""
-        config = {
+        """Возвращает дефолтную конфигурацию"""
+        self.logger.debug("Используется дефолтная конфигурация")
+        return {
             'smart_matching_enabled': True,
-
-            # Правила для категорий
-            'category_rules': {
-                # USB флешки
-                'usb_flash': {
-                    'category_patterns': ['флеш', 'flash', 'usb-накопител', 'usb накопител'],
-                    'attribute_overrides': {
-                        'тип': {
-                            'acceptable_values': ['классический', 'стандартный', 'обычный', 'usb flash', 'флешка'],
-                            'confidence': 0.9
-                        }
-                    }
-                },
-
-                # Ноутбуки
-                'notebooks': {
-                    'category_patterns': ['ноутбук', 'notebook', 'laptop', 'лэптоп'],
-                    'attribute_overrides': {
-                        'тип': {
-                            'acceptable_values': ['ноутбук', 'портативный компьютер', 'лэптоп', 'классический'],
-                            'confidence': 0.9
-                        },
-                        'форм-фактор': {
-                            'acceptable_values': ['ноутбук', 'portable', 'мобильный'],
-                            'confidence': 0.85
-                        }
-                    }
-                },
-
-                # Мониторы
-                'monitors': {
-                    'category_patterns': ['монитор', 'дисплей', 'экран', 'display'],
-                    'attribute_overrides': {
-                        'разрешение': {
-                            'value_mappings': {
-                                'full hd': ['1920x1080', '1920х1080', '1080p', 'fhd'],
-                                '4k': ['3840x2160', '2160p', 'uhd', 'ultra hd'],
-                                'hd': ['1366x768', '1280x720', '720p']
-                            },
-                            'confidence': 0.95
-                        }
-                    }
-                },
-
-                # Принтеры
-                'printers': {
-                    'category_patterns': ['принтер', 'printer', 'мфу', 'печат'],
-                    'attribute_overrides': {
-                        'тип печати': {
-                            'acceptable_values': ['лазерный', 'струйный', 'матричный', 'термо'],
-                            'confidence': 0.9
-                        },
-                        'цветность': {
-                            'value_mappings': {
-                                'цветной': ['цветная печать', 'color', 'полноцветный'],
-                                'монохромный': ['черно-белый', 'ч/б', 'mono', 'grayscale']
-                            }
-                        }
-                    }
-                },
-
-                # Канцелярские товары
-                'stationery': {
-                    'category_patterns': ['канцел', 'бумаг', 'ручк', 'каранд', 'папк', 'блок', 'тетрад'],
-                    'attribute_overrides': {
-                        'цвет': {
-                            'fuzzy_match': True,  # Разрешаем нечеткое совпадение цветов
-                            'confidence': 0.8
-                        }
-                    }
-                },
-
-                # Мебель
-                'furniture': {
-                    'category_patterns': ['стол', 'стул', 'кресло', 'шкаф', 'тумб', 'полк', 'мебел'],
-                    'attribute_overrides': {
-                        'материал': {
-                            'fuzzy_match': True,
-                            'confidence': 0.85
-                        }
-                    }
-                }
-            },
-
-            # Стандартные маппинги
-            'attribute_mappings': {
-                'объем памяти': ['память', 'объем', 'емкость памяти', 'storage', 'объём памяти', 'ram'],
-                'тип': ['вид', 'тип устройства', 'категория', 'type', 'модель', 'тип товара'],
-                'цвет': ['окраска', 'расцветка', 'оттенок', 'тон', 'цвет корпуса'],
-                'размер': ['габариты', 'габарит', 'размеры', 'dimensions'],
-                'материал': ['состав', 'материал изготовления', 'сырье', 'материал корпуса']
-            },
-
-            'value_mappings': {
-                'черный': ['чёрный', 'black', 'темный', 'dark'],
-                'usb flash': ['usb-flash', 'флешка', 'флеш-накопитель', 'usb накопитель', 'flash drive'],
-                'full hd': ['1920x1080', '1080p', 'fhd', 'фулл хд']
-            },
-
-            'unit_conversions': {
-                'гб': {'to': 'мб', 'factor': 1024},
-                'gb': {'to': 'mb', 'factor': 1024}
-            },
-
+            'category_rules': {},
+            'attribute_mappings': {},
+            'value_mappings': {},
+            'unit_conversions': {},
             'weights': {
                 'required_match': 1.0,
                 'required_miss': -2.0,
@@ -196,7 +99,6 @@ class AttributeMatcher:
                 'optional_miss': 0.0,
                 'partial_match': 0.3
             },
-
             'thresholds': {
                 'name_match': 0.7,
                 'value_match': 0.8,
@@ -204,21 +106,25 @@ class AttributeMatcher:
             }
         }
 
-        # Добавляем остальные маппинги из старой конфигурации
-        return config
-
     def match_product(self, tender: Dict[str, Any], product: Dict[str, Any]) -> Dict[str, Any]:
         """
         Основной метод для сопоставления товара с тендером
-        Теперь с умной обработкой категорий
         """
 
         self.stats['total_matches'] += 1
+
+        tender_name = tender.get('name', 'Без названия')
+        product_title = product.get('title', 'Без названия')[:50]
+
+        self.logger.info(f"=== Начало сопоставления характеристик ===")
+        self.logger.debug(f"Тендер: {tender_name}")
+        self.logger.debug(f"Товар: {product_title}...")
 
         characteristics = tender.get('characteristics', [])
         product_attrs = product.get('attributes', [])
 
         if not characteristics:
+            self.logger.debug("Нет характеристик в тендере - товар подходит")
             return {
                 'score': 1.0,
                 'confidence': 1.0,
@@ -233,11 +139,20 @@ class AttributeMatcher:
 
         # Определяем категорию товара для умного матчинга
         product_category = product.get('category', '').lower()
-        category_rule = self._get_category_rule(product_category) if self.smart_matching_enabled else None
+        category_rule = None
+
+        if self.smart_matching_enabled:
+            category_rule = self._get_category_rule(product_category)
+            if category_rule:
+                self.logger.debug(f"Применяются умные правила для категории: {product_category}")
 
         # Разделяем характеристики
         required_chars = [c for c in characteristics if c.get('required', False)]
         optional_chars = [c for c in characteristics if not c.get('required', False)]
+
+        self.logger.debug(f"Характеристики тендера: обязательных={len(required_chars)}, "
+                         f"опциональных={len(optional_chars)}")
+        self.logger.debug(f"Атрибутов товара: {len(product_attrs)}")
 
         # Результаты
         results = {
@@ -257,6 +172,7 @@ class AttributeMatcher:
         confidence_count = 0
 
         # Проверяем обязательные характеристики
+        self.logger.debug("--- Проверка обязательных характеристик ---")
         for char in required_chars:
             match_result = self._match_characteristic(char, product_attrs, category_rule, product_category)
 
@@ -264,12 +180,17 @@ class AttributeMatcher:
                 results['matched_required'] += 1
                 results['score'] += self.weights['required_match'] * match_result.score
 
+                self.logger.info(f"✓ Обязательная '{char.get('name')}': СОВПАДАЕТ "
+                               f"(скор: {match_result.score:.2f}, уверенность: {match_result.confidence:.2f})")
+
                 # Считаем умные исправления
                 if match_result.details and match_result.details.get('smart_fix'):
                     results['smart_fixes_applied'] += 1
                     self.stats['smart_fixes'] += 1
+                    self.logger.debug(f"  → Применено умное правило")
             else:
                 results['score'] += self.weights['required_miss']
+                self.logger.warning(f"✗ Обязательная '{char.get('name')}': НЕ СОВПАДАЕТ - {match_result.reason}")
 
             total_confidence += match_result.confidence
             confidence_count += 1
@@ -286,28 +207,33 @@ class AttributeMatcher:
             })
 
         # Проверяем опциональные характеристики
-        for char in optional_chars:
-            match_result = self._match_characteristic(char, product_attrs, category_rule, product_category)
+        if optional_chars:
+            self.logger.debug("--- Проверка опциональных характеристик ---")
+            for char in optional_chars:
+                match_result = self._match_characteristic(char, product_attrs, category_rule, product_category)
 
-            if match_result.matched:
-                results['matched_optional'] += 1
-                results['score'] += self.weights['optional_match'] * match_result.score
-            else:
-                results['score'] += self.weights['optional_miss']
+                if match_result.matched:
+                    results['matched_optional'] += 1
+                    results['score'] += self.weights['optional_match'] * match_result.score
 
-            total_confidence += match_result.confidence
-            confidence_count += 1
+                    self.logger.debug(f"✓ Опциональная '{char.get('name')}': совпадает")
+                else:
+                    results['score'] += self.weights['optional_miss']
+                    self.logger.debug(f"✗ Опциональная '{char.get('name')}': не совпадает")
 
-            results['details'].append({
-                'characteristic': char,
-                'matched': match_result.matched,
-                'score': match_result.score,
-                'confidence': match_result.confidence,
-                'matched_with': match_result.matched_attribute,
-                'reason': match_result.reason,
-                'required': False,
-                'smart_fix': match_result.details.get('smart_fix', False) if match_result.details else False
-            })
+                total_confidence += match_result.confidence
+                confidence_count += 1
+
+                results['details'].append({
+                    'characteristic': char,
+                    'matched': match_result.matched,
+                    'score': match_result.score,
+                    'confidence': match_result.confidence,
+                    'matched_with': match_result.matched_attribute,
+                    'reason': match_result.reason,
+                    'required': False,
+                    'smart_fix': match_result.details.get('smart_fix', False) if match_result.details else False
+                })
 
         # Считаем итоговые метрики
         results['is_suitable'] = (results['matched_required'] == results['total_required'])
@@ -338,6 +264,17 @@ class AttributeMatcher:
         if results['match_percentage'] > 0 and results['match_percentage'] < 100:
             self.stats['partial_matches'] += 1
 
+        # Итоговое логирование
+        self.logger.info(f"=== Результат сопоставления ===")
+        self.logger.info(f"Товар {'ПОДХОДИТ' if results['is_suitable'] else 'НЕ ПОДХОДИТ'}")
+        self.logger.info(f"Обязательных совпало: {results['matched_required']}/{results['total_required']}")
+        self.logger.info(f"Опциональных совпало: {results['matched_optional']}/{results['total_optional']}")
+        self.logger.info(f"Общий процент совпадения: {results['match_percentage']:.1f}%")
+        self.logger.info(f"Итоговый скор: {results['score']:.3f}, уверенность: {results['confidence']:.3f}")
+
+        if results['smart_fixes_applied'] > 0:
+            self.logger.info(f"Применено умных правил: {results['smart_fixes_applied']}")
+
         return results
 
     def _get_category_rule(self, product_category: str) -> Optional[Dict[str, Any]]:
@@ -348,19 +285,22 @@ class AttributeMatcher:
         for rule_name, rule in self.category_rules.items():
             patterns = rule.get('category_patterns', [])
             if any(pattern in category_lower for pattern in patterns):
+                self.logger.debug(f"Найдено правило '{rule_name}' для категории '{product_category}'")
                 return rule
 
         return None
 
     def _match_characteristic(self, char: Dict[str, Any],
-                            product_attrs: List[Dict[str, str]],
-                            category_rule: Optional[Dict[str, Any]] = None,
-                            product_category: str = '') -> MatchResult:
+                              product_attrs: List[Dict[str, str]],
+                              category_rule: Optional[Dict[str, Any]] = None,
+                              product_category: str = '') -> MatchResult:
         """Сопоставляет одну характеристику с учетом правил категории"""
 
         char_name = char.get('name', '').strip()
         char_value = char.get('value', '').strip()
         char_type = char.get('type', 'Качественная')
+
+        self.logger.debug(f"Сопоставление '{char_name}' = '{char_value}' (тип: {char_type})")
 
         if not char_name:
             return MatchResult(
@@ -375,6 +315,7 @@ class AttributeMatcher:
         attr_match = self._find_best_attribute_match(char_name, product_attrs)
 
         if not attr_match['attribute']:
+            self.logger.debug(f"  Атрибут '{char_name}' не найден в товаре")
             return MatchResult(
                 matched=False,
                 score=0.0,
@@ -387,6 +328,9 @@ class AttributeMatcher:
         best_attr = attr_match['attribute']
         attr_value = best_attr.get('attr_value', '').strip()
 
+        self.logger.debug(f"  Найден атрибут: '{best_attr.get('attr_name')}' = '{attr_value}' "
+                          f"(тип матча: {attr_match['match_type']}, уверенность: {attr_match['confidence']:.2f})")
+
         # Проверяем умные правила для категории
         if category_rule and self.smart_matching_enabled:
             smart_result = self._apply_smart_rules(
@@ -395,6 +339,7 @@ class AttributeMatcher:
             )
 
             if smart_result:
+                self.logger.debug(f"  Применено умное правило: {smart_result.reason}")
                 return smart_result
 
         # Стандартная проверка
@@ -429,8 +374,8 @@ class AttributeMatcher:
             )
 
     def _apply_smart_rules(self, char_name: str, char_value: str,
-                          attr_value: str, category_rule: Dict[str, Any],
-                          product_category: str) -> Optional[MatchResult]:
+                           attr_value: str, category_rule: Dict[str, Any],
+                           product_category: str) -> Optional[MatchResult]:
         """Применяет умные правила для категории"""
 
         char_name_lower = char_name.lower()
@@ -487,9 +432,8 @@ class AttributeMatcher:
 
         return None
 
-    # Остальные методы остаются без изменений
     def _find_best_attribute_match(self, char_name: str,
-                                  product_attrs: List[Dict[str, str]]) -> Dict[str, Any]:
+                                   product_attrs: List[Dict[str, str]]) -> Dict[str, Any]:
         """Находит наиболее подходящий атрибут с учетом синонимов"""
 
         char_name_lower = char_name.lower().strip()
@@ -546,7 +490,7 @@ class AttributeMatcher:
         return best_match
 
     def _match_numeric_value(self, tender_value: str, product_value: str,
-                           attr_name: str = '') -> Dict[str, Any]:
+                             attr_name: str = '') -> Dict[str, Any]:
         """Сопоставляет числовые значения с учетом единиц измерения"""
 
         # Извлекаем числа и единицы измерения
@@ -594,7 +538,7 @@ class AttributeMatcher:
                 # Для других - допуск ±10%
                 diff = abs(product_num - tender_num) / tender_num if tender_num != 0 else 0
                 matched = diff <= tolerance
-                reason = f"{product_num} {'≈' if matched else '!='} {tender_num} (откл. {diff*100:.1f}%)"
+                reason = f"{product_num} {'≈' if matched else '!='} {tender_num} (откл. {diff * 100:.1f}%)"
 
         # Уверенность зависит от точности совпадения
         if matched:

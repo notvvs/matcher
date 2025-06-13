@@ -1,14 +1,15 @@
 import os
 import re
-from collections import defaultdict
 
 from app.config.settings import settings
+from app.utils.logger import setup_logger
 
 
 class ConfigurableTermExtractor:
     """Экстрактор с оптимальной логикой для тендеров"""
 
     def __init__(self, config_dir=None):
+        self.logger = setup_logger(__name__)
         self.config_dir = config_dir or settings.CONFIG_DIR
 
         # Загружаем конфигурации
@@ -16,10 +17,9 @@ class ConfigurableTermExtractor:
         self.important_chars = self._load_config_file(settings.IMPORTANT_CHARS_FILE)
         self.synonyms_dict = self._load_synonyms()
 
-        print(f"✅ Конфигурация загружена:")
-        print(f"   - Стоп-слов: {len(self.stop_words)}")
-        print(f"   - Важных характеристик: {len(self.important_chars)}")
-        print(f"   - Синонимов: {len(self.synonyms_dict)}")
+        self.logger.info(f"Конфигурация загружена: стоп-слов={len(self.stop_words)}, "
+                         f"важных характеристик={len(self.important_chars)}, "
+                         f"синонимов={len(self.synonyms_dict)}")
 
     def _load_config_file(self, filename):
         """Загружаем конфигурационный файл"""
@@ -27,7 +27,7 @@ class ConfigurableTermExtractor:
         config_set = set()
 
         if not os.path.exists(filepath):
-            print(f"⚠️ Файл {filepath} не найден")
+            self.logger.warning(f"Файл {filepath} не найден")
             return config_set
 
         try:
@@ -37,11 +37,11 @@ class ConfigurableTermExtractor:
                     if line and not line.startswith('#'):
                         config_set.add(line.lower())
 
-            print(f"📚 Загружен {filename}: {len(config_set)} записей")
+            self.logger.debug(f"Загружен {filename}: {len(config_set)} записей")
             return config_set
 
         except Exception as e:
-            print(f"❌ Ошибка загрузки {filename}: {e}")
+            self.logger.error(f"Ошибка загрузки {filename}: {e}")
             return config_set
 
     def _load_synonyms(self):
@@ -50,7 +50,7 @@ class ConfigurableTermExtractor:
         synonyms_dict = {}
 
         if not os.path.exists(filepath):
-            print(f"⚠️ Файл синонимов не найден")
+            self.logger.warning(f"Файл синонимов не найден: {filepath}")
             return synonyms_dict
 
         try:
@@ -65,10 +65,11 @@ class ConfigurableTermExtractor:
                             synonyms_dict[word].update(synonyms)
                             synonyms_dict[word].discard(word)
 
+            self.logger.debug(f"Загружено синонимов: {len(synonyms_dict)}")
             return synonyms_dict
 
         except Exception as e:
-            print(f"❌ Ошибка загрузки синонимов: {e}")
+            self.logger.error(f"Ошибка загрузки синонимов: {e}")
             return {}
 
     def is_stop_word(self, word):
@@ -96,20 +97,25 @@ class ConfigurableTermExtractor:
         """ГЛАВНАЯ ФУНКЦИЯ с оптимальной логикой"""
 
         tender_name = tender_item.get('name', 'Без названия')
-        print(f"🎯 ОПТИМАЛЬНЫЙ анализ тендера: {tender_name}")
-        print("-" * 60)
+        self.logger.info(f"=== Начало анализа тендера: {tender_name} ===")
 
         # 1. Извлекаем сырые термины
+        self.logger.debug("Шаг 1: Извлечение сырых терминов")
         raw_terms = self._extract_raw_terms(tender_item)
 
         # 2. Классифицируем
+        self.logger.debug("Шаг 2: Классификация терминов")
         classified = self._classify_terms(raw_terms)
 
         # 3. Расширяем синонимами
+        self.logger.debug("Шаг 3: Расширение синонимами")
         expanded = self._expand_classified_terms(classified)
 
         # 4. ПРИМЕНЯЕМ ОПТИМАЛЬНУЮ ЛОГИКУ ВЕСОВ
+        self.logger.debug("Шаг 4: Применение оптимальной логики весов")
         result = self._build_optimal_tender_weights(expanded, tender_item, raw_terms)
+
+        self.logger.info(f"=== Завершен анализ тендера: {tender_name} ===")
 
         return result
 
@@ -127,7 +133,7 @@ class ConfigurableTermExtractor:
         if tender_name:
             terms['name_terms'] = self._clean_and_filter_words(tender_name)
             terms['all_text'] += f" {tender_name}"
-            print(f"📝 Из названия: {terms['name_terms']}")
+            self.logger.debug(f"Из названия извлечено терминов: {len(terms['name_terms'])} - {terms['name_terms']}")
 
         # Из характеристик
         if 'characteristics' in tender_item:
@@ -145,8 +151,8 @@ class ConfigurableTermExtractor:
                     char_value_words = self._clean_and_filter_words(str(char_value))
                     terms['char_values'].extend(char_value_words)
 
-        print(f"🔍 Сырые термины: название={len(terms['name_terms'])}, "
-              f"хар-ки={len(terms['char_names'])}, значения={len(terms['char_values'])}")
+        self.logger.debug(f"Итого сырых терминов: название={len(terms['name_terms'])}, "
+                          f"хар-ки={len(terms['char_names'])}, значения={len(terms['char_values'])}")
 
         return terms
 
@@ -190,8 +196,8 @@ class ConfigurableTermExtractor:
             if self.is_important_characteristic(char_name):
                 classified['tertiary'].append(char_name)
 
-        print(f"📊 Классификация: Primary={len(classified['primary'])}, "
-              f"Secondary={len(classified['secondary'])}, Tertiary={len(classified['tertiary'])}")
+        self.logger.debug(f"Классификация: Primary={len(classified['primary'])}, "
+                          f"Secondary={len(classified['secondary'])}, Tertiary={len(classified['tertiary'])}")
 
         return classified
 
@@ -203,12 +209,15 @@ class ConfigurableTermExtractor:
             original_count = len(terms)
             expanded[category] = self.expand_with_synonyms(terms)
             new_count = len(expanded[category])
-            print(f"📈 {category}: {original_count} → {new_count} (+{new_count - original_count} синонимов)")
+
+            if new_count > original_count:
+                self.logger.debug(f"Расширение {category}: {original_count} → {new_count} "
+                                  f"(+{new_count - original_count} синонимов)")
 
         return expanded
 
     def _build_optimal_tender_weights(self, expanded, tender_item, raw_terms):
-        """🎯 ОПТИМАЛЬНАЯ ЛОГИКА ВЕСОВ ДЛЯ ТЕНДЕРОВ"""
+        """Логика весов"""
 
         result = {
             'search_query': '',
@@ -218,22 +227,25 @@ class ConfigurableTermExtractor:
             'debug_info': {}
         }
 
-        # 1. ОСНОВНОЙ ПОИСКОВЫЙ ЗАПРОС - ОБЯЗАТЕЛЬНЫЙ
+        # 1. Основной запрос
         if expanded['primary']:
             # Берем оригинальное название без синонимов для основного запроса
             original_primary = raw_terms['name_terms'][:2]  # Оригинальные термины без синонимов
             result['search_query'] = ' '.join(original_primary)
             # В must_match_terms включаем ВСЕ термины с синонимами
             result['must_match_terms'] = expanded['primary']
+            self.logger.debug(f"Основной запрос: '{result['search_query']}'")
+            self.logger.debug(f"Обязательные термины (с синонимами): {result['must_match_terms']}")
 
-        # 2. АНАЛИЗИРУЕМ ХАРАКТЕРИСТИКИ ТЕНДЕРА
+        # 2. Анализ характеристик
         characteristics = tender_item.get('characteristics', [])
         required_chars = [c for c in characteristics if c.get('required', False)]
         optional_chars = [c for c in characteristics if not c.get('required', False)]
 
-        print(f"📋 Характеристики: обязательных={len(required_chars)}, опциональных={len(optional_chars)}")
+        self.logger.debug(f"Характеристики: обязательных={len(required_chars)}, "
+                          f"опциональных={len(optional_chars)}")
 
-        # 3. ОБЯЗАТЕЛЬНЫЕ ХАРАКТЕРИСТИКИ - МАКСИМАЛЬНЫЙ ВЕС
+        # 3. Обязательные характеристики - макс вес
         required_values = []
         for char in required_chars:
             char_value = char.get('value', '')
@@ -247,8 +259,9 @@ class ConfigurableTermExtractor:
             if term in expanded['secondary']:
                 weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
+                self.logger.debug(f"Обязательная хар-ка: '{term}' = {weight}")
 
-        # 4. ОПЦИОНАЛЬНЫЕ ХАРАКТЕРИСТИКИ - ВЫСОКИЙ ВЕС
+        # 4. Опциональным характеристикам - высокий вес
         optional_values = []
         for char in optional_chars:
             char_value = char.get('value', '')
@@ -261,8 +274,9 @@ class ConfigurableTermExtractor:
             if term in expanded['secondary'] and term not in result['boost_terms']:
                 weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
+                self.logger.debug(f"Опциональная хар-ка: '{term}' = {weight}")
 
-        # 5. НАЗВАНИЯ ВАЖНЫХ ХАРАКТЕРИСТИК - СРЕДНИЙ ВЕС
+        # 5. Для важных характеристик - средний вес
         important_char_names = []
         for char in required_chars[:3]:
             char_name = char.get('name', '')
@@ -275,8 +289,9 @@ class ConfigurableTermExtractor:
             if term in expanded['tertiary'] and term not in result['boost_terms']:
                 weight = weights_config['start'] - (i * weights_config['step'])
                 result['boost_terms'][term] = weight
+                self.logger.debug(f"Название хар-ки: '{term}' = {weight}")
 
-        # 6. СИНОНИМЫ ПОЛУЧАЮТ ПОНИЖЕННЫЙ ВЕС
+        # 6. Синонимам понижаем вес
         original_terms = set()
         original_terms.update(self._clean_and_filter_words(tender_item.get('name', '')))
         for char in characteristics:
@@ -288,10 +303,12 @@ class ConfigurableTermExtractor:
         synonym_penalty = settings.WEIGHTS['synonym_penalty']
         for term, weight in list(result['boost_terms'].items()):
             if term not in original_terms:  # Это синоним
+                old_weight = weight
                 result['boost_terms'][term] = round(weight * synonym_penalty, 2)
                 synonym_count += 1
+                self.logger.debug(f"Синоним '{term}': {old_weight} → {result['boost_terms'][term]} (-30%)")
 
-        # 7. АНТИ-ШУМОВЫЕ МЕХАНИЗМЫ
+        # 7. Анти-шумовые механизмы
         original_count = len(result['boost_terms'])
         result['boost_terms'] = {
             term: weight for term, weight in result['boost_terms'].items()
@@ -299,12 +316,15 @@ class ConfigurableTermExtractor:
         }
         removed_count = original_count - len(result['boost_terms'])
 
-        # 8. ВСЕ ТЕРМИНЫ
+        if removed_count > 0:
+            self.logger.debug(f"Удалено терминов с низким весом: {removed_count}")
+
+        # 8. Все термины
         for terms in expanded.values():
             result['all_terms'].extend(terms)
         result['all_terms'] = list(set(result['all_terms']))
 
-        # 9. ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+        # 9. Отладочная инфа
         result['debug_info'] = {
             'tender_name': tender_item.get('name', ''),
             'required_characteristics': len(required_chars),
@@ -321,11 +341,9 @@ class ConfigurableTermExtractor:
             }
         }
 
-        print(f"🎯 ОПТИМАЛЬНЫЙ РЕЗУЛЬТАТ:")
-        print(f"   - Основной запрос: '{result['search_query']}'")
-        print(f"   - Обязательные термины: {result['must_match_terms']}")
-        print(f"   - Boost терминов: {len(result['boost_terms'])}")
-        print(f"   - Синонимов с пониженным весом: {synonym_count}")
-        print(f"   - Убрано шумовых терминов: {removed_count}")
+        self.logger.info(f"Результат извлечения: основной запрос='{result['search_query']}', "
+                         f"boost терминов={len(result['boost_terms'])}, "
+                         f"синонимов с пониженным весом={synonym_count}, "
+                         f"убрано шумовых терминов={removed_count}")
 
         return result

@@ -1,13 +1,14 @@
 from elasticsearch import Elasticsearch
-import json
 
 from app.config.settings import settings
+from app.utils.logger import setup_logger
 
 
 class ElasticsearchService:
     """Сервис ES с оптимальными запросами для тендеров"""
 
     def __init__(self, host=None, port=None):
+        self.logger = setup_logger(__name__)
         self.host = host or settings.ELASTICSEARCH_HOST
         self.port = port or settings.ELASTICSEARCH_PORT
         self.index_name = settings.ELASTICSEARCH_INDEX
@@ -15,31 +16,32 @@ class ElasticsearchService:
         self.connect()
 
     def connect(self):
-        """Подключение"""
+        """Подключение к Elasticsearch"""
         try:
             self.es = Elasticsearch(**settings.get_elasticsearch_config())
-
             info = self.es.info()
-            print(f"✅ ES подключен: {info['version']['number']}")
+            self.logger.info(f"Подключен к Elasticsearch версии {info['version']['number']}")
             return True
 
         except Exception as e:
-            print(f"❌ Ошибка подключения к ES: {e}")
+            self.logger.error(f"Ошибка подключения к Elasticsearch: {e}")
             return False
 
     def search_products(self, search_terms, size=None):
-        """ОПТИМАЛЬНЫЙ поиск товаров"""
+        """Поиск товаров в Elasticsearch"""
 
         if not self.es:
+            self.logger.error("Elasticsearch не подключен")
             return {'error': 'ES не подключен'}
 
         if not self.es.indices.exists(index=self.index_name):
+            self.logger.error(f"Индекс {self.index_name} не существует")
             return {'error': f'Индекс {self.index_name} не существует'}
 
-        print(f"🎯 ОПТИМАЛЬНЫЙ ES поиск:")
-        print(f"   - Основной запрос: '{search_terms['search_query']}'")
-        print(f"   - Термины для поиска (включая синонимы): {search_terms.get('must_match_terms', [])}")
-        print(f"   - Boost терминов: {len(search_terms['boost_terms'])}")
+        self.logger.info("=== Начало поиска в Elasticsearch ===")
+        self.logger.debug(f"Основной запрос: '{search_terms['search_query']}'")
+        self.logger.debug(f"Термины для поиска (включая синонимы): {search_terms.get('must_match_terms', [])}")
+        self.logger.debug(f"Boost терминов: {len(search_terms['boost_terms'])}")
 
         # Строим ОПТИМАЛЬНЫЙ ES запрос
         query = self._build_optimal_elasticsearch_query(search_terms)
@@ -50,6 +52,7 @@ class ElasticsearchService:
         query['_source'] = ["title", "category", "brand", "attributes"]
 
         try:
+            self.logger.debug("Выполнение запроса к Elasticsearch")
             response = self.es.search(index=self.index_name, body=query)
 
             # Обрабатываем результаты
@@ -73,18 +76,27 @@ class ElasticsearchService:
                 'query_type': 'optimal_tender_search'
             }
 
-            print(f"✅ ОПТИМАЛЬНЫЙ результат: {len(candidates)} из {result['total_found']}")
-            if result['max_score'] > 0:
-                print(f"   - Макс. релевантность: {result['max_score']:.2f}")
+            self.logger.info(f"Найдено кандидатов: {len(candidates)} из {result['total_found']} "
+                             f"(макс. релевантность: {result['max_score']:.2f})")
 
+            # Логируем топ-3 результата для отладки
+            if candidates:
+                self.logger.debug("Топ-3 результата:")
+                for i, candidate in enumerate(candidates[:3]):
+                    self.logger.debug(f"  {i + 1}. {candidate['title']} "
+                                      f"(категория: {candidate['category']}, скор: {candidate['elasticsearch_score']:.2f})")
+
+            self.logger.info("=== Завершен поиск в Elasticsearch ===")
             return result
 
         except Exception as e:
-            print(f"❌ Ошибка ES поиска: {e}")
+            self.logger.error(f"Ошибка при выполнении поиска в Elasticsearch: {e}", exc_info=True)
             return {'error': str(e)}
 
     def _build_optimal_elasticsearch_query(self, search_terms):
-        """🎯 ОПТИМАЛЬНЫЙ ES запрос для тендеров"""
+        """Построение оптимального запроса для Elasticsearch"""
+
+        self.logger.debug("Построение оптимального ES запроса")
 
         # 1. ОБЯЗАТЕЛЬНЫЕ УСЛОВИЯ (MUST)
         must_clauses = []
@@ -95,6 +107,8 @@ class ElasticsearchService:
             all_search_terms = search_terms.get('must_match_terms', [])
             if not all_search_terms:
                 all_search_terms = search_terms['search_query'].split()
+
+            self.logger.debug(f"Формирование MUST условий для терминов: {all_search_terms}")
 
             must_clauses.append({
                 "bool": {
@@ -152,6 +166,8 @@ class ElasticsearchService:
 
         # Термины с индивидуальными весами
         multipliers = settings.WEIGHTS['es_field_multipliers']
+
+        self.logger.debug(f"Формирование SHOULD условий для {len(search_terms['boost_terms'])} терминов с весами")
 
         for term, weight in search_terms['boost_terms'].items():
             should_clauses.extend([
@@ -226,5 +242,8 @@ class ElasticsearchService:
                 {"_score": {"order": "desc"}}
             ]
         }
+
+        self.logger.debug(
+            f"Сформирован запрос с {len(must_clauses)} MUST условиями и {len(should_clauses)} SHOULD условиями")
 
         return query
