@@ -320,30 +320,3 @@ class ConfigurableTermExtractor:
         print(f"   - Убрано шумовых терминов: {removed_count}")
 
         return result
-
-
-# Тест
-def test_optimal_extractor():
-    """Тест оптимального экстрактора"""
-    extractor = ConfigurableTermExtractor()
-
-    test_tender = {
-        "name": "Блоки для записей",
-        "characteristics": [
-            {"name": "Цвет бумаги", "value": "Пастельный", "required": True},
-            {"name": "Тип", "value": "С клейким краем", "required": True},
-            {"name": "Количество листов в блоке", "value": "≥ 100", "required": False}
-        ]
-    }
-
-    result = extractor.extract_from_tender(test_tender)
-
-    print(f"\n🎯 ОПТИМАЛЬНЫЙ ТЕСТ:")
-    print(f"Запрос: '{result['search_query']}'")
-    print(f"Обязательные: {result['must_match_terms']}")
-    print(f"Boost terms: {result['boost_terms']}")
-    print(f"Debug info: {result['debug_info']}")
-
-
-if __name__ == "__main__":
-    test_optimal_extractor()
