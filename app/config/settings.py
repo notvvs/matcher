@@ -66,7 +66,7 @@ class Settings:
 
     # Семантический поиск
     EMBEDDINGS_MODEL = os.getenv('EMBEDDINGS_MODEL', 'intfloat/multilingual-e5-base')
-    SEMANTIC_THRESHOLD = float(os.getenv('SEMANTIC_THRESHOLD', 0.3))
+    SEMANTIC_THRESHOLD = float(os.getenv('SEMANTIC_THRESHOLD', 0.35))  # Повышено с 0.3 до 0.35
     SEMANTIC_MAX_CANDIDATES = int(os.getenv('SEMANTIC_MAX_CANDIDATES', 500))
     SEMANTIC_BATCH_SIZE = int(os.getenv('SEMANTIC_BATCH_SIZE', 64))
 

@@ -79,11 +79,16 @@ class SemanticSearchService:
         return value
 
     def filter_by_similarity(self, tender: Dict[str, Any],
-                           products: List[Dict[str, Any]],
-                           threshold: float = 0.35) -> Dict[str, Any]:
+                             products: List[Dict[str, Any]],
+                             threshold: float = None,
+                             top_k: int = -1) -> List[Dict[str, Any]]:
         """Фильтрация по семантической близости."""
         if not products:
-            return {'products': [], 'stats': {}}
+            return []
+
+        # Используем порог из настроек если не передан
+        if threshold is None:
+            threshold = settings.SEMANTIC_THRESHOLD
 
         # Создаем текст тендера
         tender_text = self.create_tender_text(tender)
@@ -103,7 +108,7 @@ class SemanticSearchService:
                 continue
 
         if not product_texts:
-            return {'products': [], 'stats': {}}
+            return []
 
         # Вычисляем эмбеддинги
         print(f"🧠 Вычисление эмбеддингов для {len(product_texts)} товаров...")
@@ -112,7 +117,7 @@ class SemanticSearchService:
             tender_embedding = self.model.encode([tender_text], convert_to_numpy=True)
 
             # Батчевая обработка
-            batch_size = 64
+            batch_size = settings.SEMANTIC_BATCH_SIZE
             product_embeddings = []
 
             for i in range(0, len(product_texts), batch_size):
@@ -127,57 +132,57 @@ class SemanticSearchService:
 
         # Фильтруем результаты
         filtered_products = []
-        stats = {
-            'total_processed': len(valid_products),
-            'above_threshold': 0,
-            'final_count': 0
-        }
 
         for product, similarity in zip(valid_products, similarities):
             if similarity >= threshold:
-                stats['above_threshold'] += 1
                 product['semantic_score'] = float(similarity)
                 filtered_products.append(product)
-
-        stats['final_count'] = len(filtered_products)
 
         # Сортируем по семантической близости
         filtered_products.sort(key=lambda x: x['semantic_score'], reverse=True)
 
-        return {
-            'products': filtered_products,
-            'stats': stats
-        }
+        # Ограничиваем количество если указано
+        if top_k > 0:
+            filtered_products = filtered_products[:top_k]
 
+        print(f"✅ После семантической фильтрации: {len(filtered_products)} из {len(products)}")
 
+        return filtered_products
 
-    def combine_with_es_scores(self, products: List[Dict[str, Any]],
-                             es_scores: Dict[str, float]) -> List[Dict[str, Any]]:
+    def combine_with_es_scores(self, products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Комбинирование ES и семантических скоров с защитой от ложных срабатываний."""
+
         for product in products:
-            product_id = product['_id']
-            es_score = es_scores.get(product_id, 0.0)
+            # Получаем скоры
+            es_score = product.get('elasticsearch_score', 0.0)
             semantic_score = product.get('semantic_score', 0.0)
 
             # Нормализуем ES скор (обычно он в диапазоне 0-100)
             normalized_es_score = min(es_score / 10.0, 1.0)
 
-            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: если ES скор очень низкий, снижаем влияние семантики
+            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: адаптивная формула в зависимости от ES скора
             if normalized_es_score < 0.05:  # ES скор < 0.5
                 # ES почти не нашел совпадений - семантика может ошибаться
                 # Даем 80% веса ES скору, только 20% семантике
-                final_score = (0.8 * normalized_es_score + 0.2 * semantic_score)
+                combined_score = (0.8 * normalized_es_score + 0.2 * semantic_score)
             elif normalized_es_score < 0.2:  # ES скор < 2.0
                 # Низкий ES скор - осторожнее с семантикой
-                final_score = (0.65 * normalized_es_score + 0.35 * semantic_score)
+                combined_score = (0.65 * normalized_es_score + 0.35 * semantic_score)
             elif semantic_score > 0.75 and normalized_es_score < 0.3:
                 # Высокая семантика + низкий ES = подозрительно
-                final_score = (0.6 * normalized_es_score + 0.4 * semantic_score)
+                combined_score = (0.6 * normalized_es_score + 0.4 * semantic_score)
             else:
-                # Нормальная ситуация - равные веса
-                final_score = (0.5 * normalized_es_score + 0.5 * semantic_score)
+                # Нормальная ситуация - используем веса из настроек
+                combined_score = (
+                        settings.ES_SCORE_WEIGHT * normalized_es_score +
+                        settings.SEMANTIC_SCORE_WEIGHT * semantic_score
+                )
 
-            product['es_score'] = normalized_es_score
-            product['final_score'] = final_score
+            # Сохраняем скоры
+            product['normalized_es_score'] = normalized_es_score
+            product['combined_score'] = combined_score
+
+        # Сортируем по комбинированному скору
+        products.sort(key=lambda x: x['combined_score'], reverse=True)
 
         return products
