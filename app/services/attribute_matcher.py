@@ -1,703 +1,750 @@
+"""
+Гибридный AttributeMatcher v2 - оптимизированный для производительности
+"""
+
 import re
 import json
-from typing import List, Dict, Any, Optional
-from difflib import SequenceMatcher
-from dataclasses import dataclass
+import time
+import hashlib
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple, Set
+from dataclasses import dataclass, field
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import pickle
 from pathlib import Path
+
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import redis
+from pymongo import MongoClient
 
 from app.config.settings import settings
 from app.utils.logger import setup_logger
 
 
 @dataclass
-class MatchResult:
-    """Результат сопоставления характеристики"""
+class AttributeMatch:
+    """Результат сопоставления атрибута"""
     matched: bool
-    score: float
-    confidence: float  # Уверенность в совпадении 0-1
-    matched_attribute: Optional[Dict[str, str]]
+    confidence: float
+    tender_char: Dict[str, Any]
+    product_attr: Optional[Dict[str, str]]
     reason: str
-    details: Dict[str, Any] = None
+    match_type: str  # 'exact', 'semantic', 'partial', 'numeric'
 
 
-class AttributeMatcher:
-    """Rule-based матчер для сопоставления характеристик с умной логикой категорий"""
+@dataclass
+class ProductMatch:
+    """Результат сопоставления товара"""
+    is_suitable: bool
+    score: float
+    matched_required: int
+    total_required: int
+    matched_optional: int
+    total_optional: int
+    matches: List[AttributeMatch]
+    processing_time: float
 
-    def __init__(self, config_path: str = None):
+    @property
+    def match_percentage(self) -> float:
+        total = self.total_required + self.total_optional
+        if total == 0:
+            return 0.0
+        matched = self.matched_required + self.matched_optional
+        return (matched / total) * 100
+
+
+class HybridAttributeMatcher:
+    """Гибридный матчер с ML и оптимизациями"""
+
+    def __init__(self,
+                 use_cache: bool = True,
+                 cache_ttl: int = 86400,  # 24 часа
+                 batch_size: int = 32,
+                 num_workers: int = 4):
+
         self.logger = setup_logger(__name__)
+        self.use_cache = use_cache
+        self.cache_ttl = cache_ttl
+        self.batch_size = batch_size
+        self.num_workers = num_workers
 
-        # Загружаем конфигурацию
-        self.config_path = config_path or settings.CONFIG_DIR / 'attribute_matching_config.json'
-        self.config = self._load_config()
-
-        # Веса для скоринга
-        self.weights = self.config.get('weights', {
-            'required_match': 1.0,
-            'required_miss': -2.0,
-            'optional_match': 0.5,
-            'optional_miss': 0.0,
-            'partial_match': 0.3
-        })
-
-        # Пороги
-        self.thresholds = self.config.get('thresholds', {
-            'name_match': 0.7,
-            'value_match': 0.8,
-            'numeric_tolerance': 0.1
-        })
-
-        # Словари соответствий
-        self.attribute_mappings = self.config.get('attribute_mappings', {})
-        self.value_mappings = self.config.get('value_mappings', {})
-        self.unit_conversions = self.config.get('unit_conversions', {})
-
-        # Правила для категорий
-        self.category_rules = self.config.get('category_rules', {})
-        self.smart_matching_enabled = self.config.get('smart_matching_enabled', True)
+        # Инициализация компонентов
+        self._init_ml_model()
+        self._init_cache()
+        self._init_patterns()
+        self._init_mappings()
 
         # Статистика
         self.stats = {
+            'cache_hits': 0,
+            'cache_misses': 0,
             'total_matches': 0,
-            'successful_matches': 0,
-            'failed_matches': 0,
-            'partial_matches': 0,
-            'smart_fixes': 0  # Сколько раз умная логика помогла
+            'avg_processing_time': 0
         }
 
-        self.logger.info("AttributeMatcher инициализирован")
-        self.logger.debug(f"Загружено: {len(self.attribute_mappings)} маппингов атрибутов, "
-                         f"{len(self.value_mappings)} маппингов значений, "
-                         f"{len(self.category_rules)} правил категорий")
+        self.logger.info("HybridAttributeMatcher инициализирован")
 
-    def _load_config(self) -> Dict[str, Any]:
-        """Загружает конфигурацию из файла"""
-        try:
-            if Path(self.config_path).exists():
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    self.logger.debug(f"Конфигурация загружена из {self.config_path}")
-                    return config
-        except Exception as e:
-            self.logger.warning(f"Не удалось загрузить конфигурацию: {e}, используются значения по умолчанию")
+    def _init_ml_model(self):
+        """Инициализация ML модели"""
+        self.logger.info("Загрузка ML модели...")
+        self.model = SentenceTransformer(settings.EMBEDDINGS_MODEL)
 
-        # Дефолтная конфигурация
-        return self._get_default_config()
+        # Оптимизация для CPU
+        self.model.max_seq_length = 128  # Уменьшаем для скорости
 
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Возвращает дефолтную конфигурацию"""
-        self.logger.debug("Используется дефолтная конфигурация")
-        return {
-            'smart_matching_enabled': True,
-            'category_rules': {},
-            'attribute_mappings': {},
-            'value_mappings': {},
-            'unit_conversions': {},
-            'weights': {
-                'required_match': 1.0,
-                'required_miss': -2.0,
-                'optional_match': 0.5,
-                'optional_miss': 0.0,
-                'partial_match': 0.3
-            },
-            'thresholds': {
-                'name_match': 0.7,
-                'value_match': 0.8,
-                'numeric_tolerance': 0.1
-            }
+        # Предзагрузка модели
+        _ = self.model.encode(["тест"], show_progress_bar=False)
+        self.logger.info("ML модель загружена")
+
+    def _init_cache(self):
+        """Инициализация кэша"""
+        if self.use_cache:
+            try:
+                self.redis_client = redis.Redis(
+                    host='localhost',
+                    port=6379,
+                    decode_responses=False  # Для бинарных данных
+                )
+                self.redis_client.ping()
+                self.logger.info("Redis кэш подключен")
+            except:
+                self.logger.warning("Redis недоступен, работаем без кэша")
+                self.use_cache = False
+                self.redis_client = None
+        else:
+            self.redis_client = None
+
+    def _init_patterns(self):
+        """Паттерны для парсинга"""
+        self.patterns = {
+            # Числа с единицами измерения
+            'number_unit': re.compile(
+                r'(\d+(?:[.,]\d+)?)\s*([а-яА-Яa-zA-Z]+(?:/[а-яА-Яa-zA-Z]+)?)?'
+            ),
+            # Диапазоны
+            'range': re.compile(
+                r'(?:от\s*)?(\d+(?:[.,]\d+)?)\s*(?:до|-)\s*(\d+(?:[.,]\d+)?)'
+            ),
+            # Операторы сравнения
+            'comparison': re.compile(
+                r'([<>≤≥]|(?:более|менее|от|до|не\s*(?:более|менее)))\s*(\d+(?:[.,]\d+)?)'
+            ),
+            # Размеры (ШxВxГ)
+            'dimensions': re.compile(
+                r'(\d+(?:[.,]\d+)?)\s*[xх×]\s*(\d+(?:[.,]\d+)?)\s*(?:[xх×]\s*(\d+(?:[.,]\d+)?))?'
+            )
         }
 
-    def match_product(self, tender: Dict[str, Any], product: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Основной метод для сопоставления товара с тендером
-        """
+    def _init_mappings(self):
+        """Базовые маппинги единиц измерения"""
+        self.unit_mappings = {
+            # Объем
+            'мл': ['ml', 'миллилитр', 'миллилитров'],
+            'л': ['l', 'литр', 'литров'],
+            # Вес
+            'г': ['g', 'гр', 'грамм', 'граммов'],
+            'кг': ['kg', 'килограмм', 'килограммов'],
+            # Время
+            'сек': ['с', 'секунд', 'секунды', 'sec', 's'],
+            'мин': ['м', 'минут', 'минуты', 'min'],
+            # Размер
+            'мм': ['mm', 'миллиметр', 'миллиметров'],
+            'см': ['cm', 'сантиметр', 'сантиметров'],
+            'м': ['m', 'метр', 'метров']
+        }
 
+        # Обратный индекс
+        self.unit_reverse = {}
+        for canonical, variants in self.unit_mappings.items():
+            self.unit_reverse[canonical] = canonical
+            for var in variants:
+                self.unit_reverse[var.lower()] = canonical
+
+    def match_product(self, tender: Dict[str, Any], product: Dict[str, Any]) -> ProductMatch:
+        """Основной метод сопоставления"""
+
+        start_time = time.time()
         self.stats['total_matches'] += 1
 
         tender_name = tender.get('name', 'Без названия')
-        product_title = product.get('title', 'Без названия')[:50]
+        product_title = product.get('title', 'Без названия')
 
-        self.logger.info(f"=== Начало сопоставления характеристик ===")
-        self.logger.debug(f"Тендер: {tender_name}")
-        self.logger.debug(f"Товар: {product_title}...")
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"Сопоставление: {tender_name[:60]}...")
+        self.logger.info(f"Товар: {product_title[:60]}...")
 
+        # Подготовка данных
         characteristics = tender.get('characteristics', [])
         product_attrs = product.get('attributes', [])
 
-        if not characteristics:
-            self.logger.debug("Нет характеристик в тендере - товар подходит")
-            return {
-                'score': 1.0,
-                'confidence': 1.0,
-                'matched_required': 0,
-                'total_required': 0,
-                'matched_optional': 0,
-                'total_optional': 0,
-                'match_percentage': 100.0,
-                'is_suitable': True,
-                'details': []
-            }
+        # Убираем дубликаты атрибутов товара
+        product_attrs = self._deduplicate_attributes(product_attrs)
 
-        # Определяем категорию товара для умного матчинга
-        product_category = product.get('category', '').lower()
-        category_rule = None
+        # Предвычисляем эмбеддинги для всех атрибутов товара
+        product_embeddings = self._get_product_embeddings(product_attrs)
 
-        if self.smart_matching_enabled:
-            category_rule = self._get_category_rule(product_category)
-            if category_rule:
-                self.logger.debug(f"Применяются умные правила для категории: {product_category}")
-
-        # Разделяем характеристики
-        required_chars = [c for c in characteristics if c.get('required', False)]
-        optional_chars = [c for c in characteristics if not c.get('required', False)]
-
-        self.logger.debug(f"Характеристики тендера: обязательных={len(required_chars)}, "
-                         f"опциональных={len(optional_chars)}")
-        self.logger.debug(f"Атрибутов товара: {len(product_attrs)}")
-
-        # Результаты
-        results = {
-            'score': 0.0,
-            'confidence': 0.0,
-            'matched_required': 0,
-            'total_required': len(required_chars),
-            'matched_optional': 0,
-            'total_optional': len(optional_chars),
-            'match_percentage': 0.0,
-            'is_suitable': False,
-            'details': [],
-            'smart_fixes_applied': 0
-        }
-
-        total_confidence = 0.0
-        confidence_count = 0
-
-        # Проверяем обязательные характеристики
-        self.logger.debug("--- Проверка обязательных характеристик ---")
-        for char in required_chars:
-            match_result = self._match_characteristic(char, product_attrs, category_rule, product_category)
-
-            if match_result.matched:
-                results['matched_required'] += 1
-                results['score'] += self.weights['required_match'] * match_result.score
-
-                self.logger.info(f"✓ Обязательная '{char.get('name')}': СОВПАДАЕТ "
-                               f"(скор: {match_result.score:.2f}, уверенность: {match_result.confidence:.2f})")
-
-                # Считаем умные исправления
-                if match_result.details and match_result.details.get('smart_fix'):
-                    results['smart_fixes_applied'] += 1
-                    self.stats['smart_fixes'] += 1
-                    self.logger.debug(f"  → Применено умное правило")
-            else:
-                results['score'] += self.weights['required_miss']
-                self.logger.warning(f"✗ Обязательная '{char.get('name')}': НЕ СОВПАДАЕТ - {match_result.reason}")
-
-            total_confidence += match_result.confidence
-            confidence_count += 1
-
-            results['details'].append({
-                'characteristic': char,
-                'matched': match_result.matched,
-                'score': match_result.score,
-                'confidence': match_result.confidence,
-                'matched_with': match_result.matched_attribute,
-                'reason': match_result.reason,
-                'required': True,
-                'smart_fix': match_result.details.get('smart_fix', False) if match_result.details else False
-            })
-
-        # Проверяем опциональные характеристики
-        if optional_chars:
-            self.logger.debug("--- Проверка опциональных характеристик ---")
-            for char in optional_chars:
-                match_result = self._match_characteristic(char, product_attrs, category_rule, product_category)
-
-                if match_result.matched:
-                    results['matched_optional'] += 1
-                    results['score'] += self.weights['optional_match'] * match_result.score
-
-                    self.logger.debug(f"✓ Опциональная '{char.get('name')}': совпадает")
-                else:
-                    results['score'] += self.weights['optional_miss']
-                    self.logger.debug(f"✗ Опциональная '{char.get('name')}': не совпадает")
-
-                total_confidence += match_result.confidence
-                confidence_count += 1
-
-                results['details'].append({
-                    'characteristic': char,
-                    'matched': match_result.matched,
-                    'score': match_result.score,
-                    'confidence': match_result.confidence,
-                    'matched_with': match_result.matched_attribute,
-                    'reason': match_result.reason,
-                    'required': False,
-                    'smart_fix': match_result.details.get('smart_fix', False) if match_result.details else False
-                })
-
-        # Считаем итоговые метрики
-        results['is_suitable'] = (results['matched_required'] == results['total_required'])
-
-        # Процент совпадения
-        total_matched = results['matched_required'] + results['matched_optional']
-        total_chars = results['total_required'] + results['total_optional']
-        results['match_percentage'] = (total_matched / total_chars * 100) if total_chars > 0 else 0
-
-        # Средняя уверенность
-        results['confidence'] = (total_confidence / confidence_count) if confidence_count > 0 else 0
-
-        # Нормализуем скор
-        max_possible_score = (
-            len(required_chars) * self.weights['required_match'] +
-            len(optional_chars) * self.weights['optional_match']
+        # Параллельная обработка характеристик
+        matches = self._match_characteristics_parallel(
+            characteristics,
+            product_attrs,
+            product_embeddings
         )
 
-        if max_possible_score > 0:
-            results['score'] = max(0, min(1, results['score'] / max_possible_score))
+        # Подсчет результатов
+        matched_required = sum(1 for m in matches if m.matched and m.tender_char.get('required', False))
+        total_required = sum(1 for m in matches if m.tender_char.get('required', False))
+        matched_optional = sum(1 for m in matches if m.matched and not m.tender_char.get('required', False))
+        total_optional = sum(1 for m in matches if not m.tender_char.get('required', False))
+
+        is_suitable = matched_required == total_required
+
+        # Расчет скора
+        score = self._calculate_score(matches)
+
+        processing_time = time.time() - start_time
 
         # Обновляем статистику
-        if results['is_suitable']:
-            self.stats['successful_matches'] += 1
+        self.stats['avg_processing_time'] = (
+            self.stats['avg_processing_time'] * (self.stats['total_matches'] - 1) + processing_time
+        ) / self.stats['total_matches']
+
+        result = ProductMatch(
+            is_suitable=is_suitable,
+            score=score,
+            matched_required=matched_required,
+            total_required=total_required,
+            matched_optional=matched_optional,
+            total_optional=total_optional,
+            matches=matches,
+            processing_time=processing_time
+        )
+
+        # Логирование результата
+        self.logger.info(f"Результат: {'✅ ПОДХОДИТ' if is_suitable else '❌ НЕ ПОДХОДИТ'}")
+        self.logger.info(f"Обязательных: {matched_required}/{total_required}")
+        self.logger.info(f"Опциональных: {matched_optional}/{total_optional}")
+        self.logger.info(f"Процент совпадения: {result.match_percentage:.1f}%")
+        self.logger.info(f"Время обработки: {processing_time:.3f} сек")
+        self.logger.info(f"{'='*80}\n")
+
+        return result
+
+    def _deduplicate_attributes(self, attributes: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Удаляет дубликаты атрибутов"""
+        seen = set()
+        unique = []
+
+        for attr in attributes:
+            key = (attr.get('attr_name', '').strip().lower(),
+                   attr.get('attr_value', '').strip().lower())
+            if key not in seen and key[0]:  # Пропускаем пустые
+                seen.add(key)
+                unique.append(attr)
+
+        return unique
+
+    def _get_product_embeddings(self, attributes: List[Dict[str, str]]) -> Dict[str, np.ndarray]:
+        """Получает эмбеддинги для атрибутов товара с кэшированием"""
+
+        embeddings = {}
+        to_encode = []
+        cache_keys = []
+
+        for attr in attributes:
+            attr_text = f"{attr['attr_name']}: {attr['attr_value']}"
+            cache_key = f"emb:{hashlib.md5(attr_text.encode()).hexdigest()}"
+
+            # Проверяем кэш
+            if self.use_cache:
+                cached = self.redis_client.get(cache_key)
+                if cached:
+                    embeddings[attr_text] = pickle.loads(cached)
+                    self.stats['cache_hits'] += 1
+                    continue
+
+            to_encode.append(attr_text)
+            cache_keys.append(cache_key)
+            self.stats['cache_misses'] += 1
+
+        # Кодируем некэшированные
+        if to_encode:
+            self.logger.debug(f"Кодирование {len(to_encode)} атрибутов...")
+            new_embeddings = self.model.encode(
+                to_encode,
+                batch_size=self.batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True
+            )
+
+            # Сохраняем в кэш
+            for text, embedding, cache_key in zip(to_encode, new_embeddings, cache_keys):
+                embeddings[text] = embedding
+                if self.use_cache:
+                    self.redis_client.setex(
+                        cache_key,
+                        self.cache_ttl,
+                        pickle.dumps(embedding)
+                    )
+
+        return embeddings
+
+    def _match_characteristics_parallel(self,
+                                      characteristics: List[Dict[str, Any]],
+                                      product_attrs: List[Dict[str, str]],
+                                      product_embeddings: Dict[str, np.ndarray]) -> List[AttributeMatch]:
+        """Параллельное сопоставление характеристик"""
+
+        matches = []
+
+        # Для небольшого количества характеристик последовательная обработка быстрее
+        if len(characteristics) <= 5:
+            for char in characteristics:
+                match = self._match_single_characteristic(char, product_attrs, product_embeddings)
+                matches.append(match)
         else:
-            self.stats['failed_matches'] += 1
+            # Параллельная обработка для большого количества
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                futures = []
+                for char in characteristics:
+                    future = executor.submit(
+                        self._match_single_characteristic,
+                        char, product_attrs, product_embeddings
+                    )
+                    futures.append(future)
 
-        if results['match_percentage'] > 0 and results['match_percentage'] < 100:
-            self.stats['partial_matches'] += 1
+                for future in as_completed(futures):
+                    matches.append(future.result())
 
-        # Итоговое логирование
-        self.logger.info(f"=== Результат сопоставления ===")
-        self.logger.info(f"Товар {'ПОДХОДИТ' if results['is_suitable'] else 'НЕ ПОДХОДИТ'}")
-        self.logger.info(f"Обязательных совпало: {results['matched_required']}/{results['total_required']}")
-        self.logger.info(f"Опциональных совпало: {results['matched_optional']}/{results['total_optional']}")
-        self.logger.info(f"Общий процент совпадения: {results['match_percentage']:.1f}%")
-        self.logger.info(f"Итоговый скор: {results['score']:.3f}, уверенность: {results['confidence']:.3f}")
+        return matches
 
-        if results['smart_fixes_applied'] > 0:
-            self.logger.info(f"Применено умных правил: {results['smart_fixes_applied']}")
-
-        return results
-
-    def _get_category_rule(self, product_category: str) -> Optional[Dict[str, Any]]:
-        """Определяет правило для категории товара"""
-
-        category_lower = product_category.lower()
-
-        for rule_name, rule in self.category_rules.items():
-            patterns = rule.get('category_patterns', [])
-            if any(pattern in category_lower for pattern in patterns):
-                self.logger.debug(f"Найдено правило '{rule_name}' для категории '{product_category}'")
-                return rule
-
-        return None
-
-    def _match_characteristic(self, char: Dict[str, Any],
-                              product_attrs: List[Dict[str, str]],
-                              category_rule: Optional[Dict[str, Any]] = None,
-                              product_category: str = '') -> MatchResult:
-        """Сопоставляет одну характеристику с учетом правил категории"""
+    def _match_single_characteristic(self,
+                                   char: Dict[str, Any],
+                                   product_attrs: List[Dict[str, str]],
+                                   product_embeddings: Dict[str, np.ndarray]) -> AttributeMatch:
+        """Сопоставление одной характеристики"""
 
         char_name = char.get('name', '').strip()
         char_value = char.get('value', '').strip()
         char_type = char.get('type', 'Качественная')
 
-        self.logger.debug(f"Сопоставление '{char_name}' = '{char_value}' (тип: {char_type})")
-
         if not char_name:
-            return MatchResult(
+            return AttributeMatch(
                 matched=False,
-                score=0.0,
                 confidence=0.0,
-                matched_attribute=None,
-                reason="Пустое название характеристики"
+                tender_char=char,
+                product_attr=None,
+                reason="Пустое название характеристики",
+                match_type='error'
             )
 
-        # 1. Ищем подходящий атрибут
-        attr_match = self._find_best_attribute_match(char_name, product_attrs)
+        # Кодируем характеристику тендера
+        char_text = f"{char_name}: {char_value}"
+        char_embedding = self._get_embedding(char_text)
 
-        if not attr_match['attribute']:
-            self.logger.debug(f"  Атрибут '{char_name}' не найден в товаре")
-            return MatchResult(
-                matched=False,
-                score=0.0,
-                confidence=attr_match['confidence'],
-                matched_attribute=None,
-                reason=f"Атрибут '{char_name}' не найден в товаре"
-            )
+        # Ищем лучшее соответствие
+        best_match = None
+        best_score = 0.0
+        best_attr = None
+        best_type = 'none'
 
-        # 2. Сравниваем значения
-        best_attr = attr_match['attribute']
-        attr_value = best_attr.get('attr_value', '').strip()
-
-        self.logger.debug(f"  Найден атрибут: '{best_attr.get('attr_name')}' = '{attr_value}' "
-                          f"(тип матча: {attr_match['match_type']}, уверенность: {attr_match['confidence']:.2f})")
-
-        # Проверяем умные правила для категории
-        if category_rule and self.smart_matching_enabled:
-            smart_result = self._apply_smart_rules(
-                char_name, char_value, attr_value,
-                category_rule, product_category
-            )
-
-            if smart_result:
-                self.logger.debug(f"  Применено умное правило: {smart_result.reason}")
-                return smart_result
-
-        # Стандартная проверка
-        if char_type == 'Количественная':
-            value_match = self._match_numeric_value(char_value, attr_value, char_name)
-        else:
-            value_match = self._match_categorical_value(char_value, attr_value)
-
-        # 3. Комбинируем результаты
-        combined_confidence = attr_match['confidence'] * value_match['confidence']
-
-        if value_match['matched']:
-            return MatchResult(
-                matched=True,
-                score=value_match['score'],
-                confidence=combined_confidence,
-                matched_attribute=best_attr,
-                reason=value_match['reason'],
-                details={
-                    'name_match_confidence': attr_match['confidence'],
-                    'value_match_confidence': value_match['confidence'],
-                    'match_type': attr_match['match_type']
-                }
-            )
-        else:
-            return MatchResult(
-                matched=False,
-                score=0.0,
-                confidence=combined_confidence,
-                matched_attribute=best_attr,
-                reason=value_match['reason']
-            )
-
-    def _apply_smart_rules(self, char_name: str, char_value: str,
-                           attr_value: str, category_rule: Dict[str, Any],
-                           product_category: str) -> Optional[MatchResult]:
-        """Применяет умные правила для категории"""
-
-        char_name_lower = char_name.lower()
-        overrides = category_rule.get('attribute_overrides', {})
-
-        # Проверяем, есть ли правило для этого атрибута
-        for override_attr, rules in overrides.items():
-            if override_attr in char_name_lower or char_name_lower in override_attr:
-
-                # Проверяем допустимые значения
-                if 'acceptable_values' in rules:
-                    attr_value_lower = attr_value.lower()
-                    for acceptable in rules['acceptable_values']:
-                        if acceptable.lower() == attr_value_lower:
-                            confidence = rules.get('confidence', 0.9)
-                            return MatchResult(
-                                matched=True,
-                                score=0.9,  # Немного ниже точного совпадения
-                                confidence=confidence,
-                                matched_attribute={'attr_name': char_name, 'attr_value': attr_value},
-                                reason=f"Принято для категории '{product_category}': '{char_value}' ≈ '{attr_value}'",
-                                details={'smart_fix': True}
-                            )
-
-                # Проверяем маппинги значений
-                if 'value_mappings' in rules:
-                    char_value_lower = char_value.lower()
-                    for expected, alternatives in rules['value_mappings'].items():
-                        if char_value_lower == expected.lower():
-                            attr_value_lower = attr_value.lower()
-                            if any(alt.lower() == attr_value_lower for alt in alternatives):
-                                confidence = rules.get('confidence', 0.95)
-                                return MatchResult(
-                                    matched=True,
-                                    score=0.95,
-                                    confidence=confidence,
-                                    matched_attribute={'attr_name': char_name, 'attr_value': attr_value},
-                                    reason=f"Умное соответствие: '{char_value}' = '{attr_value}'",
-                                    details={'smart_fix': True}
-                                )
-
-                # Проверяем fuzzy matching
-                if rules.get('fuzzy_match', False):
-                    similarity = SequenceMatcher(None, char_value.lower(), attr_value.lower()).ratio()
-                    if similarity >= 0.7:  # Пониженный порог для fuzzy
-                        return MatchResult(
-                            matched=True,
-                            score=similarity,
-                            confidence=similarity * rules.get('confidence', 0.8),
-                            matched_attribute={'attr_name': char_name, 'attr_value': attr_value},
-                            reason=f"Fuzzy match для категории: '{char_value}' ~ '{attr_value}'",
-                            details={'smart_fix': True}
-                        )
-
-        return None
-
-    def _find_best_attribute_match(self, char_name: str,
-                                   product_attrs: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Находит наиболее подходящий атрибут с учетом синонимов"""
-
-        char_name_lower = char_name.lower().strip()
-        best_match = {
-            'attribute': None,
-            'confidence': 0.0,
-            'match_type': 'none'
-        }
-
-        # Проверяем каждый атрибут товара
         for attr in product_attrs:
-            attr_name = attr.get('attr_name', '').lower().strip()
+            attr_text = f"{attr['attr_name']}: {attr['attr_value']}"
+            attr_embedding = product_embeddings.get(attr_text)
 
-            if not attr_name:
+            if attr_embedding is None:
                 continue
 
-            # 1. Точное совпадение
-            if attr_name == char_name_lower:
-                return {
-                    'attribute': attr,
-                    'confidence': 1.0,
-                    'match_type': 'exact'
-                }
+            # Семантическая близость
+            semantic_similarity = cosine_similarity([char_embedding], [attr_embedding])[0][0]
 
-            # 2. Проверяем через маппинги
-            for key, synonyms in self.attribute_mappings.items():
-                if char_name_lower == key or char_name_lower in synonyms:
-                    if attr_name == key or attr_name in synonyms:
-                        return {
-                            'attribute': attr,
-                            'confidence': 0.95,
-                            'match_type': 'synonym'
-                        }
+            # Если семантическая близость высокая, проверяем значения
+            if semantic_similarity > 0.6:
+                # Проверка значений в зависимости от типа
+                if char_type == 'Количественная':
+                    value_match = self._match_numeric_values(char_value, attr['attr_value'])
+                else:
+                    value_match = self._match_categorical_values(char_value, attr['attr_value'])
 
-            # 3. Проверяем вхождение подстроки
-            if char_name_lower in attr_name or attr_name in char_name_lower:
-                confidence = 0.85 if len(char_name_lower) > 3 else 0.7
-                if confidence > best_match['confidence']:
-                    best_match = {
-                        'attribute': attr,
-                        'confidence': confidence,
-                        'match_type': 'substring'
-                    }
+                # Комбинированный скор
+                if value_match['matched']:
+                    combined_score = semantic_similarity * 0.6 + value_match['confidence'] * 0.4
+                    match_type = value_match.get('type', 'semantic')
+                else:
+                    combined_score = semantic_similarity * 0.3  # Штраф за несовпадение значения
+                    match_type = 'partial'
 
-            # 4. Fuzzy matching
-            similarity = SequenceMatcher(None, char_name_lower, attr_name).ratio()
-            if similarity >= self.thresholds['name_match'] and similarity > best_match['confidence']:
-                best_match = {
-                    'attribute': attr,
-                    'confidence': similarity,
-                    'match_type': 'fuzzy'
-                }
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_attr = attr
+                    best_match = value_match
+                    best_type = match_type
 
-        return best_match
+        # Порог для принятия решения
+        threshold = 0.65 if char.get('required', False) else 0.6
 
-    def _match_numeric_value(self, tender_value: str, product_value: str,
-                             attr_name: str = '') -> Dict[str, Any]:
-        """Сопоставляет числовые значения с учетом единиц измерения"""
+        if best_score >= threshold and best_match and best_match['matched']:
+            return AttributeMatch(
+                matched=True,
+                confidence=best_score,
+                tender_char=char,
+                product_attr=best_attr,
+                reason=f"Найдено соответствие: {best_attr['attr_name']} = {best_attr['attr_value']}",
+                match_type=best_type
+            )
+        else:
+            reason = "Атрибут не найден"
+            if best_attr:
+                reason = f"Найден атрибут '{best_attr['attr_name']}', но значение не подходит"
 
-        # Извлекаем числа и единицы измерения
-        tender_parsed = self._parse_numeric_value(tender_value)
-        product_parsed = self._parse_numeric_value(product_value)
+            return AttributeMatch(
+                matched=False,
+                confidence=best_score,
+                tender_char=char,
+                product_attr=best_attr,
+                reason=reason,
+                match_type='not_found'
+            )
 
-        if not tender_parsed['numbers'] or not product_parsed['numbers']:
-            return {
-                'matched': False,
-                'score': 0.0,
-                'confidence': 0.0,
-                'reason': f"Не удалось извлечь числа из '{tender_value}' или '{product_value}'"
-            }
+    def _get_embedding(self, text: str) -> np.ndarray:
+        """Получает эмбеддинг с кэшированием"""
 
-        # Приводим к одной единице измерения если нужно
+        cache_key = f"emb:{hashlib.md5(text.encode()).hexdigest()}"
+
+        # Проверяем кэш
+        if self.use_cache:
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                self.stats['cache_hits'] += 1
+                return pickle.loads(cached)
+
+        self.stats['cache_misses'] += 1
+
+        # Кодируем
+        embedding = self.model.encode(
+            [text],
+            show_progress_bar=False,
+            convert_to_numpy=True
+        )[0]
+
+        # Сохраняем в кэш
+        if self.use_cache:
+            self.redis_client.setex(
+                cache_key,
+                self.cache_ttl,
+                pickle.dumps(embedding)
+            )
+
+        return embedding
+
+    def _match_numeric_values(self, tender_value: str, product_value: str) -> Dict[str, Any]:
+        """Сопоставление числовых значений"""
+
+        # Парсим числа и единицы измерения
+        tender_parsed = self._parse_numeric(tender_value)
+        product_parsed = self._parse_numeric(product_value)
+
+        if not tender_parsed['number'] or not product_parsed['number']:
+            # Не удалось распарсить как числа - пробуем как строки
+            return self._match_categorical_values(tender_value, product_value)
+
+        # Приводим к одинаковым единицам измерения
         if tender_parsed['unit'] and product_parsed['unit']:
-            product_parsed = self._convert_units(product_parsed, tender_parsed['unit'])
+            tender_unit = self.unit_reverse.get(tender_parsed['unit'].lower(), tender_parsed['unit'])
+            product_unit = self.unit_reverse.get(product_parsed['unit'].lower(), product_parsed['unit'])
 
-        # Определяем тип сравнения
-        tender_num = tender_parsed['numbers'][0]
-        product_num = product_parsed['numbers'][0]
+            if tender_unit != product_unit:
+                # Пытаемся конвертировать
+                product_parsed = self._try_convert_units(
+                    product_parsed['number'],
+                    product_unit,
+                    tender_unit
+                ) or product_parsed
 
-        # Проверяем операторы
-        if tender_parsed['operator'] == 'min':
-            matched = product_num >= tender_num
-            reason = f"{product_num} {'>=' if matched else '<'} {tender_num}"
+        # Сравнение в зависимости от оператора
+        tender_num = tender_parsed['number']
+        product_num = product_parsed['number']
+        operator = tender_parsed.get('operator', 'eq')
 
-        elif tender_parsed['operator'] == 'max':
-            matched = product_num <= tender_num
-            reason = f"{product_num} {'<=' if matched else '>'} {tender_num}"
+        matched = False
+        tolerance = 0.1  # 10% допуск
 
-        elif tender_parsed['operator'] == 'range' and len(tender_parsed['numbers']) == 2:
-            min_val, max_val = tender_parsed['numbers']
+        if operator == 'eq':
+            matched = abs(product_num - tender_num) <= tender_num * tolerance
+        elif operator == 'gte':
+            matched = product_num >= tender_num * (1 - tolerance)
+        elif operator == 'lte':
+            matched = product_num <= tender_num * (1 + tolerance)
+        elif operator == 'range':
+            min_val = tender_parsed.get('range_min', tender_num) * (1 - tolerance)
+            max_val = tender_parsed.get('range_max', tender_num) * (1 + tolerance)
             matched = min_val <= product_num <= max_val
-            reason = f"{product_num} {'в' if matched else 'не в'} диапазоне [{min_val}, {max_val}]"
-
-        else:
-            # Точное совпадение с допуском
-            tolerance = self.thresholds['numeric_tolerance']
-            if attr_name.lower() in ['количество', 'количество листов']:
-                # Для количества используем точное совпадение или больше
-                matched = product_num >= tender_num
-                reason = f"{product_num} {'>=' if matched else '<'} {tender_num}"
-            else:
-                # Для других - допуск ±10%
-                diff = abs(product_num - tender_num) / tender_num if tender_num != 0 else 0
-                matched = diff <= tolerance
-                reason = f"{product_num} {'≈' if matched else '!='} {tender_num} (откл. {diff * 100:.1f}%)"
-
-        # Уверенность зависит от точности совпадения
-        if matched:
-            if tender_parsed['operator'] in ['min', 'max', 'range']:
-                confidence = 0.95
-            else:
-                # Чем ближе значения, тем выше уверенность
-                diff_ratio = abs(product_num - tender_num) / tender_num if tender_num != 0 else 0
-                confidence = max(0.5, 1.0 - diff_ratio)
-        else:
-            confidence = 0.8  # Высокая уверенность в несовпадении
 
         return {
             'matched': matched,
-            'score': 1.0 if matched else 0.0,
-            'confidence': confidence,
-            'reason': reason
+            'confidence': 0.9 if matched else 0.3,
+            'type': 'numeric',
+            'details': {
+                'tender': tender_num,
+                'product': product_num,
+                'operator': operator
+            }
         }
 
-    def _match_categorical_value(self, tender_value: str, product_value: str) -> Dict[str, Any]:
-        """Сопоставляет категориальные значения"""
+    def _match_categorical_values(self, tender_value: str, product_value: str) -> Dict[str, Any]:
+        """Сопоставление категориальных значений"""
 
-        tender_val_lower = tender_value.lower().strip()
-        product_val_lower = product_value.lower().strip()
+        # Нормализация
+        tender_norm = tender_value.lower().strip()
+        product_norm = product_value.lower().strip()
 
-        # 1. Точное совпадение
-        if tender_val_lower == product_val_lower:
+        # Точное совпадение
+        if tender_norm == product_norm:
             return {
                 'matched': True,
-                'score': 1.0,
                 'confidence': 1.0,
-                'reason': f"Точное совпадение: '{product_value}'"
+                'type': 'exact'
             }
 
-        # 2. Проверяем маппинги значений
-        for key, synonyms in self.value_mappings.items():
-            if tender_val_lower == key or tender_val_lower in synonyms:
-                if product_val_lower == key or product_val_lower in synonyms:
-                    return {
-                        'matched': True,
-                        'score': 0.95,
-                        'confidence': 0.95,
-                        'reason': f"Синонимы: '{tender_value}' = '{product_value}'"
-                    }
-
-        # 3. Проверяем вхождение
-        if len(tender_val_lower) > 3:  # Для коротких строк не проверяем
-            if tender_val_lower in product_val_lower:
+        # Проверка вхождения
+        if len(tender_norm) > 3:
+            if tender_norm in product_norm or product_norm in tender_norm:
                 return {
                     'matched': True,
-                    'score': 0.85,
                     'confidence': 0.85,
-                    'reason': f"'{tender_value}' входит в '{product_value}'"
-                }
-            if product_val_lower in tender_val_lower:
-                return {
-                    'matched': True,
-                    'score': 0.85,
-                    'confidence': 0.85,
-                    'reason': f"'{product_value}' входит в '{tender_value}'"
+                    'type': 'substring'
                 }
 
-        # 4. Fuzzy matching
-        similarity = SequenceMatcher(None, tender_val_lower, product_val_lower).ratio()
-        if similarity >= self.thresholds['value_match']:
+        # Семантическая близость для коротких значений
+        if len(tender_norm) <= 20 and len(product_norm) <= 20:
+            similarity = cosine_similarity(
+                [self._get_embedding(tender_norm)],
+                [self._get_embedding(product_norm)]
+            )[0][0]
+
+            if similarity > 0.8:
+                return {
+                    'matched': True,
+                    'confidence': similarity,
+                    'type': 'semantic'
+                }
+
+        # Специальные случаи
+        # Да/Нет
+        positive = {'да', 'есть', 'имеется', 'присутствует', '+', 'true', 'наличие'}
+        negative = {'нет', 'отсутствует', 'без', '-', 'false', 'отсутствие'}
+
+        if (tender_norm in positive and product_norm in positive) or \
+           (tender_norm in negative and product_norm in negative):
             return {
                 'matched': True,
-                'score': similarity,
-                'confidence': similarity,
-                'reason': f"Схожие значения: '{tender_value}' ~ '{product_value}' ({similarity:.0%})"
+                'confidence': 0.95,
+                'type': 'boolean'
             }
 
         return {
             'matched': False,
-            'score': 0.0,
-            'confidence': 0.9,  # Высокая уверенность в несовпадении
-            'reason': f"Не совпадает: '{tender_value}' != '{product_value}'"
+            'confidence': 0.0,
+            'type': 'no_match'
         }
 
-    def _parse_numeric_value(self, value: str) -> Dict[str, Any]:
-        """Парсит числовое значение, извлекая числа, оператор и единицы измерения"""
+    def _parse_numeric(self, value: str) -> Dict[str, Any]:
+        """Парсинг числового значения"""
 
-        value_clean = value.lower().strip()
-        result = {
-            'numbers': [],
-            'operator': 'exact',
-            'unit': None
-        }
+        if not value:
+            return {'number': None, 'unit': None}
 
-        # Убираем пробелы между цифрами
-        value_clean = re.sub(r'(\d)\s+(\d)', r'\1\2', value_clean)
+        value = value.lower().strip()
 
-        # Определяем оператор
-        # Проверяем диапазон
-        range_match = re.search(r'от\s*(\d+\.?\d*)\s*до\s*(\d+\.?\d*)', value_clean)
+        # Проверяем операторы сравнения
+        operator = 'eq'
+        comp_match = self.patterns['comparison'].search(value)
+        if comp_match:
+            op_text = comp_match.group(1)
+            if 'боле' in op_text or '>' in op_text or '≥' in op_text:
+                operator = 'gte'
+            elif 'мене' in op_text or '<' in op_text or '≤' in op_text:
+                operator = 'lte'
+
+        # Проверяем диапазоны
+        range_match = self.patterns['range'].search(value)
         if range_match:
-            result['numbers'] = [float(range_match.group(1)), float(range_match.group(2))]
-            result['operator'] = 'range'
-        else:
-            # Проверяем минимум
-            min_match = re.search(r'(?:от|более|больше|свыше|минимум|не менее|≥|>=|>)\s*(\d+\.?\d*)', value_clean)
-            if min_match:
-                result['numbers'] = [float(min_match.group(1))]
-                result['operator'] = 'min'
-            else:
-                # Проверяем максимум
-                max_match = re.search(r'(?:до|менее|меньше|максимум|не более|≤|<=|<)\s*(\d+\.?\d*)', value_clean)
-                if max_match:
-                    result['numbers'] = [float(max_match.group(1))]
-                    result['operator'] = 'max'
+            return {
+                'number': float(range_match.group(1).replace(',', '.')),
+                'range_min': float(range_match.group(1).replace(',', '.')),
+                'range_max': float(range_match.group(2).replace(',', '.')),
+                'operator': 'range',
+                'unit': None
+            }
+
+        # Обычные числа с единицами
+        num_match = self.patterns['number_unit'].search(value)
+        if num_match:
+            number = float(num_match.group(1).replace(',', '.'))
+            unit = num_match.group(2) if num_match.group(2) else None
+
+            return {
+                'number': number,
+                'unit': unit,
+                'operator': operator
+            }
+
+        return {'number': None, 'unit': None}
+
+    def _try_convert_units(self, value: float, from_unit: str, to_unit: str) -> Optional[Dict[str, Any]]:
+        """Попытка конвертации единиц измерения"""
+
+        # Простые конверсии
+        conversions = {
+            ('мл', 'л'): 0.001,
+            ('л', 'мл'): 1000,
+            ('г', 'кг'): 0.001,
+            ('кг', 'г'): 1000,
+            ('мм', 'см'): 0.1,
+            ('см', 'мм'): 10,
+            ('см', 'м'): 0.01,
+            ('м', 'см'): 100
+        }
+
+        key = (from_unit.lower(), to_unit.lower())
+        if key in conversions:
+            return {
+                'number': value * conversions[key],
+                'unit': to_unit,
+                'operator': 'eq'
+            }
+
+        return None
+
+    def _calculate_score(self, matches: List[AttributeMatch]) -> float:
+        """Расчет итогового скора"""
+
+        if not matches:
+            return 0.0
+
+        # Веса для разных типов характеристик
+        weights = {
+            'required_match': 1.0,
+            'required_miss': -2.0,
+            'optional_match': 0.5,
+            'optional_miss': 0.0
+        }
+
+        score = 0.0
+        max_possible = 0.0
+
+        for match in matches:
+            is_required = match.tender_char.get('required', False)
+
+            if match.matched:
+                if is_required:
+                    score += weights['required_match'] * match.confidence
+                    max_possible += weights['required_match']
                 else:
-                    # Извлекаем все числа
-                    numbers = re.findall(r'\d+\.?\d*', value_clean)
-                    if numbers:
-                        result['numbers'] = [float(numbers[0])]
+                    score += weights['optional_match'] * match.confidence
+                    max_possible += weights['optional_match']
+            else:
+                if is_required:
+                    score += weights['required_miss']
+                    max_possible += weights['required_match']
+                else:
+                    score += weights['optional_miss']
+                    max_possible += weights['optional_match']
 
-        # Извлекаем единицу измерения
-        units = ['гб', 'gb', 'мб', 'mb', 'гбайт', 'мбайт', 'тб', 'кг', 'г', 'см', 'мм', 'м']
-        for unit in units:
-            if unit in value_clean:
-                result['unit'] = unit
-                break
+        # Нормализация
+        if max_possible > 0:
+            normalized = (score + abs(weights['required_miss'] * len(matches))) / \
+                        (max_possible + abs(weights['required_miss'] * len(matches)))
+            return max(0.0, min(1.0, normalized))
 
-        return result
-
-    def _convert_units(self, value_dict: Dict[str, Any], target_unit: str) -> Dict[str, Any]:
-        """Конвертирует единицы измерения"""
-
-        if not value_dict['unit'] or value_dict['unit'] == target_unit:
-            return value_dict
-
-        conversions = self.unit_conversions
-
-        # Прямая конверсия
-        if value_dict['unit'] in conversions:
-            conv = conversions[value_dict['unit']]
-            if conv['to'] == target_unit:
-                value_dict['numbers'] = [n * conv['factor'] for n in value_dict['numbers']]
-                value_dict['unit'] = target_unit
-
-        # Обратная конверсия
-        for unit, conv in conversions.items():
-            if conv['to'] == value_dict['unit'] and unit == target_unit:
-                value_dict['numbers'] = [n / conv['factor'] for n in value_dict['numbers']]
-                value_dict['unit'] = target_unit
-                break
-
-        return value_dict
+        return 0.0
 
     def get_stats(self) -> Dict[str, Any]:
-        """Возвращает статистику матчинга"""
-        total = self.stats['total_matches']
-        if total == 0:
-            return self.stats
+        """Получение статистики работы"""
+
+        cache_total = self.stats['cache_hits'] + self.stats['cache_misses']
+        cache_hit_rate = self.stats['cache_hits'] / cache_total if cache_total > 0 else 0
 
         return {
-            **self.stats,
-            'success_rate': self.stats['successful_matches'] / total,
-            'failure_rate': self.stats['failed_matches'] / total,
-            'partial_rate': self.stats['partial_matches'] / total,
-            'smart_fix_rate': self.stats['smart_fixes'] / total if total > 0 else 0
+            'total_matches': self.stats['total_matches'],
+            'avg_processing_time': f"{self.stats['avg_processing_time']:.3f} сек",
+            'cache_hit_rate': f"{cache_hit_rate:.1%}",
+            'cache_hits': self.stats['cache_hits'],
+            'cache_misses': self.stats['cache_misses']
         }
+
+    def precompute_product_embeddings(self,
+                                    products: List[Dict[str, Any]],
+                                    batch_size: int = 100) -> None:
+        """Предвычисление эмбеддингов для списка товаров"""
+
+        self.logger.info(f"Предвычисление эмбеддингов для {len(products)} товаров...")
+
+        all_texts = []
+        for product in products:
+            attrs = self._deduplicate_attributes(product.get('attributes', []))
+            for attr in attrs:
+                all_texts.append(f"{attr['attr_name']}: {attr['attr_value']}")
+
+        # Батчевая обработка
+        for i in range(0, len(all_texts), batch_size):
+            batch = all_texts[i:i + batch_size]
+            _ = self.model.encode(batch, show_progress_bar=True)
+
+            # Сохраняем в кэш
+            if self.use_cache:
+                embeddings = self.model.encode(batch, show_progress_bar=False)
+                for text, emb in zip(batch, embeddings):
+                    cache_key = f"emb:{hashlib.md5(text.encode()).hexdigest()}"
+                    self.redis_client.setex(
+                        cache_key,
+                        self.cache_ttl,
+                        pickle.dumps(emb)
+                    )
+
+        self.logger.info("Предвычисление завершено")
+
+
+# Вспомогательные функции для интеграции
+
+def create_matcher() -> HybridAttributeMatcher:
+    """Создает экземпляр матчера с оптимальными настройками"""
+
+    # Проверяем доступность Redis
+    try:
+        redis.Redis(host='localhost', port=6379).ping()
+        use_cache = True
+    except:
+        use_cache = False
+
+    return HybridAttributeMatcher(
+        use_cache=use_cache,
+        cache_ttl=86400,  # 24 часа
+        batch_size=32,
+        num_workers=4
+    )
+
+
+def match_products_batch(matcher: HybridAttributeMatcher,
+                        tender: Dict[str, Any],
+                        products: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], ProductMatch]]:
+    """Сопоставление тендера с несколькими товарами"""
+
+    results = []
+
+    # Предвычисляем эмбеддинги для всех товаров
+    matcher.precompute_product_embeddings(products, batch_size=50)
+
+    # Сопоставляем
+    for product in products:
+        match_result = matcher.match_product(tender, product)
+        if match_result.is_suitable:
+            results.append((product, match_result))
+
+    # Сортируем по скору
+    results.sort(key=lambda x: x[1].score, reverse=True)
+
+    return results
+
+

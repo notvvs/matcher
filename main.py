@@ -6,10 +6,11 @@ import time
 import json
 from typing import Dict, Any, List
 
+from app.services.attribute_matcher import create_matcher
 from app.services.extractor import ConfigurableTermExtractor
 from app.services.elasticsearch_service import ElasticsearchService
 from app.services.semantic_search import SemanticSearchService
-from app.services.attribute_matcher import AttributeMatcher
+
 from app.config.settings import settings
 from app.utils.logger import setup_logger
 
@@ -30,9 +31,16 @@ class TenderMatcher:
         self.extractor = ConfigurableTermExtractor()
         self.es_service = ElasticsearchService()
         self.semantic_service = SemanticSearchService()
-        self.attribute_matcher = AttributeMatcher()
+
+        # Используем новый гибридный матчер
+        self.attribute_matcher = create_matcher()
 
         self.logger.info("Все сервисы инициализированы")
+
+        # Выводим информацию о матчере
+        if hasattr(self.attribute_matcher, 'use_cache'):
+            cache_status = "включен" if self.attribute_matcher.use_cache else "выключен"
+            self.logger.info(f"AttributeMatcher: гибридный режим, кэш {cache_status}")
 
     def process_tender(self, tender: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -145,8 +153,16 @@ class TenderMatcher:
             self.logger.info("-" * 40)
 
             stage4_start = time.time()
-            final_products = []
 
+            # Предварительное кэширование эмбеддингов для ускорения
+            if len(semantic_filtered) > 50:
+                self.logger.info("Предвычисление эмбеддингов для ускорения...")
+                self.attribute_matcher.precompute_product_embeddings(
+                    semantic_filtered[:100],  # Ограничиваем для скорости
+                    batch_size=50
+                )
+
+            final_products = []
             self.logger.info(f"Проверка {len(semantic_filtered)} товаров...")
 
             for i, product in enumerate(semantic_filtered):
@@ -154,13 +170,42 @@ class TenderMatcher:
                 if i > 0 and i % 10 == 0:
                     self.logger.debug(f"Обработано {i}/{len(semantic_filtered)} товаров...")
 
+                # Используем новый матчер
                 match_result = self.attribute_matcher.match_product(tender, product)
 
-                if match_result['is_suitable']:
-                    product['match_details'] = match_result
+                # Преобразуем результат в формат старого матчера для совместимости
+                if match_result.is_suitable:
+                    # Преобразуем ProductMatch в словарь для совместимости
+                    match_details = {
+                        'score': match_result.score,
+                        'confidence': match_result.score,  # Используем score как confidence
+                        'matched_required': match_result.matched_required,
+                        'total_required': match_result.total_required,
+                        'matched_optional': match_result.matched_optional,
+                        'total_optional': match_result.total_optional,
+                        'match_percentage': match_result.match_percentage,
+                        'is_suitable': match_result.is_suitable,
+                        'processing_time': match_result.processing_time,
+                        'details': [
+                            {
+                                'characteristic': m.tender_char,
+                                'matched': m.matched,
+                                'score': m.confidence,
+                                'confidence': m.confidence,
+                                'matched_with': m.product_attr,
+                                'reason': m.reason,
+                                'required': m.tender_char.get('required', False),
+                                'match_type': m.match_type
+                            }
+                            for m in match_result.matches
+                        ]
+                    }
+
+                    product['match_details'] = match_details
                     final_products.append(product)
 
-                    self.logger.info(f"✓ Товар #{i+1} '{product['title'][:50]}...' ПОДХОДИТ")
+                    self.logger.info(f"✓ Товар #{i+1} '{product['title'][:50]}...' ПОДХОДИТ "
+                                   f"(скор: {match_result.score:.2f})")
 
             stage4_time = time.time() - stage4_start
 
@@ -199,6 +244,15 @@ class TenderMatcher:
                 'total_time': f"{total_time:.2f}s"
             }
 
+            # Добавляем статистику матчера
+            if hasattr(self.attribute_matcher, 'get_stats'):
+                matcher_stats = self.attribute_matcher.get_stats()
+                results['statistics']['matcher_stats'] = matcher_stats
+
+                # Логируем статистику кэша
+                if 'cache_hit_rate' in matcher_stats:
+                    self.logger.info(f"Статистика кэша: {matcher_stats['cache_hit_rate']}")
+
             # Финальное логирование
             self.logger.info("\n" + "=" * 80)
             self.logger.info(f"ОБРАБОТКА ЗАВЕРШЕНА")
@@ -227,28 +281,22 @@ def main():
 
     logger = setup_logger(__name__)
 
-    # Пример тендера
+    # Пример тендера для тестирования
     tender_example = {
-        "name": "Блоки для записей",
+        "name": "Календарь печатный",
         "characteristics": [
             {
-                "name": "Ширина",
-                "value": "> 80 и ≤ 90 ММ",
+                "name": "Вид календаря",
+                "value": "Перекидной",
+                "type": "Качественная",
+                "required": True
+            },
+            {
+                "name": "Тип календаря",
+                "value": "Настенный",
                 "type": "Количественная",
                 "required": True
             },
-            {
-                "name": "Длина ",
-                "value": "> 80 и ≤ 90 ММ",
-                "type": "Качественная",
-                "required": True
-            },
-            {
-                "name": "Количество листов в блоке",
-                "value": "≥ 500 ШТ",
-                "type": "Качественная",
-                "required": False
-            }
         ]
     }
 
@@ -267,10 +315,21 @@ def main():
         logger.info(f"Результаты сохранены в файл: {output_file}")
 
         # Вывод статистики матчера
-        logger.info("\nСТАТИСТИКА ATTRIBUTE MATCHER:")
-        stats = matcher.attribute_matcher.get_stats()
-        for key, value in stats.items():
-            logger.info(f"  {key}: {value}")
+        if 'matcher_stats' in results.get('statistics', {}):
+            logger.info("\nСТАТИСТИКА HYBRID ATTRIBUTE MATCHER:")
+            stats = results['statistics']['matcher_stats']
+            for key, value in stats.items():
+                logger.info(f"  {key}: {value}")
+
+        # Вывод итоговой информации
+        logger.info(f"\nИТОГО:")
+        logger.info(f"  Найдено товаров: {results['statistics']['total_products_found']}")
+        logger.info(f"  Общее время: {results['statistics']['total_time']}")
+
+        # Детали по этапам
+        logger.info(f"\nВРЕМЯ ПО ЭТАПАМ:")
+        for stage, timing in results['statistics']['stages_timing'].items():
+            logger.info(f"  {stage}: {timing}")
 
     except Exception as e:
         logger.error(f"Ошибка в основной программе: {e}", exc_info=True)
