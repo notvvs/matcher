@@ -1,7 +1,7 @@
 import os
 import re
 
-from app.config.settings import settings
+from app.core.settings import settings
 from app.utils.logger import setup_logger
 
 

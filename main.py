@@ -1,177 +1,20 @@
-"""
-Главный модуль системы поиска товаров для тендеров
-"""
-
 import time
 import json
-from typing import Dict, Any, List
+import argparse
+from pathlib import Path
+from typing import Dict, Any
 
-from app.services.extractor import ConfigurableTermExtractor
-from app.services.elasticsearch_service import ElasticsearchService
-from app.services.semantic_search import SemanticSearchService
-
-from app.config.settings import settings
+from app.pipeline.factory import create_pipeline
 from app.utils.logger import setup_logger
 
 
-class TenderMatcher:
-    """Основной класс для поиска товаров по тендеру"""
-
-    def __init__(self):
-        self.logger = setup_logger(__name__)
-
-        self.logger.info("Инициализация системы...")
-
-        try:
-            self.extractor = ConfigurableTermExtractor()
-            self.es_service = ElasticsearchService()
-            self.semantic_service = SemanticSearchService()
-
-            self.logger.info("Система готова к работе")
-
-        except Exception as e:
-            self.logger.error(f"Ошибка инициализации: {e}")
-            raise
-
-    def process_tender(self, tender: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Основной метод обработки тендера
-
-        Этапы:
-        1. Извлечение терминов из тендера
-        2. Поиск в Elasticsearch (500k → 2k)
-        3. Семантическая фильтрация (2k → финальные результаты)
-        """
-
-        start_time = time.time()
-        tender_name = tender.get('name', 'Без названия')
-
-        self.logger.info(f"Обработка тендера: {tender_name}")
-
-        results = {
-            'tender': tender,
-            'stages': {},
-            'final_products': [],
-            'statistics': {},
-            'execution_time': 0
-        }
-
-        try:
-            # Этап 1: Извлечение терминов
-            self.logger.info("Извлечение терминов...")
-            stage1_start = time.time()
-
-            search_terms = self.extractor.extract_from_tender(tender)
-
-            stage1_time = time.time() - stage1_start
-
-            results['stages']['extraction'] = {
-                'search_query': search_terms['search_query'],
-                'boost_terms_count': len(search_terms['boost_terms']),
-                'execution_time': stage1_time
-            }
-
-            self.logger.info(f"Извлечено терминов: {len(search_terms['boost_terms'])}, время: {stage1_time:.2f}с")
-
-            # Этап 2: Поиск в Elasticsearch
-            self.logger.info("Поиск в Elasticsearch...")
-            stage2_start = time.time()
-
-            es_results = self.es_service.search_products(
-                search_terms,
-                size=settings.MAX_SEARCH_RESULTS
-            )
-
-            stage2_time = time.time() - stage2_start
-
-            if 'error' in es_results:
-                self.logger.error(f"Ошибка ES: {es_results['error']}")
-                results['error'] = es_results['error']
-                return results
-
-            candidates = es_results.get('candidates', [])
-
-            results['stages']['elasticsearch'] = {
-                'total_found': es_results['total_found'],
-                'candidates_retrieved': len(candidates),
-                'max_score': es_results.get('max_score', 0),
-                'execution_time': stage2_time
-            }
-
-            self.logger.info(f"Найдено: {len(candidates)} из {es_results['total_found']}, время: {stage2_time:.2f}с")
-
-            if not candidates:
-                self.logger.warning("Товары не найдены")
-                return results
-
-            # Этап 3: Семантическая фильтрация
-            self.logger.info("Семантическая фильтрация...")
-            stage3_start = time.time()
-
-            semantic_filtered = self.semantic_service.filter_by_similarity(
-                tender,
-                candidates,
-                threshold=settings.SEMANTIC_THRESHOLD,
-                top_k=settings.SEMANTIC_MAX_CANDIDATES
-            )
-
-            semantic_filtered = self.semantic_service.combine_with_es_scores(semantic_filtered)
-            stage3_time = time.time() - stage3_start
-
-            results['stages']['semantic'] = {
-                'input_products': len(candidates),
-                'filtered_products': len(semantic_filtered),
-                'threshold_used': settings.SEMANTIC_THRESHOLD,
-                'execution_time': stage3_time
-            }
-
-            self.logger.info(f"Отфильтровано: {len(semantic_filtered)} из {len(candidates)}, время: {stage3_time:.2f}с")
-
-            if not semantic_filtered:
-                self.logger.warning("Все товары отфильтрованы")
-                return results
-
-            # Семантически отфильтрованные товары становятся финальными
-            final_products = semantic_filtered[:settings.MAX_FINAL_RESULTS]
-            results['final_products'] = final_products
-
-            # Общая статистика
-            total_time = time.time() - start_time
-            results['execution_time'] = total_time
-
-            results['statistics'] = {
-                'total_products_found': len(final_products),
-                'stages_timing': {
-                    'extraction': f"{stage1_time:.2f}s",
-                    'elasticsearch': f"{stage2_time:.2f}s",
-                    'semantic': f"{stage3_time:.2f}s"
-                },
-                'total_time': f"{total_time:.2f}s"
-            }
-
-            # Итоговая информация
-            self.logger.info(f"Обработка завершена: найдено {len(final_products)} товаров за {total_time:.2f}с")
-
-            # Топ результаты
-            if final_products:
-                self.logger.info("Топ-3 результата:")
-                for i, product in enumerate(final_products[:3], 1):
-                    self.logger.info(f"  {i}. {product['title']} (скор: {product.get('combined_score', 0):.3f})")
-
-        except Exception as e:
-            self.logger.error(f"Критическая ошибка: {e}", exc_info=True)
-            results['error'] = str(e)
-
-        return results
-
-
-def main():
-    """Основная функция"""
+def process_tender_example():
+    """Обработка примера тендера"""
 
     logger = setup_logger(__name__)
 
     # Пример тендера
-    tender_example = {
+    tender = {
         "name": "Блокнот",
         "characteristics": [
             {
@@ -196,19 +39,147 @@ def main():
     }
 
     try:
-        # Инициализация и обработка
-        matcher = TenderMatcher()
-        results = matcher.process_tender(tender_example)
+        # Создаем пайплайн
+        logger.info("Инициализация системы...")
+        pipeline = create_pipeline()
 
-        # Сохранение результатов
+        # Обрабатываем тендер
+        logger.info("Начало обработки тендера...")
+        result = pipeline.process(tender)
+
+        # Сохраняем результаты
         output_file = f"results_{int(time.time())}.json"
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(result, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"Результаты сохранены: {output_file}")
+        logger.info(f"Результаты сохранены в файл: {output_file}")
+
+        # Выводим краткую статистику
+        if 'error' not in result:
+            print_results_summary(result)
+        else:
+            logger.error(f"Ошибка обработки: {result['error']}")
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
+
+def process_tender_file(filename: str):
+    """Обработка тендера из файла"""
+
+    logger = setup_logger(__name__)
+
+    try:
+        # Загружаем тендер из файла
+        with open(filename, 'r', encoding='utf-8') as f:
+            tender = json.load(f)
+
+        logger.info(f"Загружен тендер из файла: {filename}")
+
+        # Создаем пайплайн
+        pipeline = create_pipeline()
+
+        # Обрабатываем
+        result = pipeline.process(tender)
+
+        # Сохраняем результаты
+        output_file = f"results_{Path(filename).stem}_{int(time.time())}.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Результаты сохранены в файл: {output_file}")
+
+        if 'error' not in result:
+            print_results_summary(result)
+
+    except FileNotFoundError:
+        logger.error(f"Файл не найден: {filename}")
+    except json.JSONDecodeError:
+        logger.error(f"Ошибка парсинга JSON в файле: {filename}")
+    except Exception as e:
+        logger.error(f"Ошибка обработки файла: {e}", exc_info=True)
+
+
+def print_results_summary(result: Dict[str, Any]):
+    """Выводит краткую сводку результатов"""
+
+    print("\n" + "="*60)
+    print("РЕЗУЛЬТАТЫ ОБРАБОТКИ ТЕНДЕРА")
+    print("="*60)
+
+    # Информация о тендере
+    tender = result.get('tender', {})
+    print(f"Тендер: {tender.get('name', 'Без названия')}")
+    print(f"Характеристик: {len(tender.get('characteristics', []))}")
+
+    # Статистика по этапам
+    stages = result.get('stages', {})
+
+    if 'extraction' in stages:
+        extraction = stages['extraction']
+        print(f"\nИзвлечение терминов:")
+        print(f"  - Boost терминов: {extraction.get('boost_terms_count', 0)}")
+        print(f"  - Время: {extraction.get('execution_time', 0):.2f}с")
+
+    if 'elasticsearch' in stages:
+        es_stage = stages['elasticsearch']
+        print(f"\nПоиск в Elasticsearch:")
+        print(f"  - Найдено всего: {es_stage.get('total_found', 0)}")
+        print(f"  - Получено кандидатов: {es_stage.get('candidates_retrieved', 0)}")
+        print(f"  - Время: {es_stage.get('execution_time', 0):.2f}с")
+
+    if 'semantic' in stages:
+        semantic = stages['semantic']
+        print(f"\nСемантическая фильтрация:")
+        print(f"  - Входных товаров: {semantic.get('input_products', 0)}")
+        print(f"  - После фильтрации: {semantic.get('filtered_products_count', 0)}")
+        print(f"  - Время: {semantic.get('execution_time', 0):.2f}с")
+
+    # Финальные результаты
+    final_products = result.get('final_products', [])
+    print(f"\nФинальные результаты:")
+    print(f"  - Найдено товаров: {len(final_products)}")
+    print(f"  - Общее время: {result.get('execution_time', 0):.2f}с")
+
+    # Топ-5 товаров
+    if final_products:
+        print(f"\nТоп-5 товаров:")
+        for i, product in enumerate(final_products[:5], 1):
+            print(f"  {i}. {product.get('title', 'Без названия')}")
+            print(f"     Категория: {product.get('category', 'Н/Д')}")
+            print(f"     Скор: {product.get('combined_score', 0):.3f}")
+
+    print("="*60 + "\n")
+
+
+def main():
+    """Главная функция"""
+
+    parser = argparse.ArgumentParser(
+        description="Система поиска товаров для тендеров"
+    )
+
+    parser.add_argument(
+        '--file', '-f',
+        type=str,
+        help='Путь к JSON файлу с тендером'
+    )
+
+    parser.add_argument(
+        '--example', '-e',
+        action='store_true',
+        help='Запустить с примером тендера'
+    )
+
+    args = parser.parse_args()
+
+    if args.file:
+        process_tender_file(args.file)
+    elif args.example:
+        process_tender_example()
+    else:
+        # По умолчанию запускаем пример
+        process_tender_example()
 
 
 if __name__ == "__main__":

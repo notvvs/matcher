@@ -6,7 +6,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import re
 import time
 
-from app.config.settings import settings
+from app.core.settings import settings
 from app.utils.logger import setup_logger
 
 
