@@ -4,14 +4,16 @@ import logging
 from elasticsearch import Elasticsearch
 
 from app.core.settings import settings
-from .query_builder import ElasticsearchQueryBuilder
+from app.services.search.query_builder import ElasticsearchQueryBuilder
+
+# Используем стандартный логгер
+logger = logging.getLogger(__name__)
 
 
 class ElasticsearchClient:
     """Клиент для поиска товаров в Elasticsearch"""
 
     def __init__(self, query_builder: ElasticsearchQueryBuilder = None):
-        self.logger = logging.getLogger(__name__)
         self.es = None
         self.index_name = settings.ELASTICSEARCH_INDEX
         self.query_builder = query_builder or ElasticsearchQueryBuilder()
@@ -27,12 +29,12 @@ class ElasticsearchClient:
 
             # Проверяем подключение
             info = self.es.info()
-            self.logger.info(f"Подключен к Elasticsearch {info['version']['number']}")
+            logger.info(f"Подключен к Elasticsearch {info['version']['number']}")
 
             return True
 
         except Exception as e:
-            self.logger.error(f"Ошибка подключения к Elasticsearch: {e}")
+            logger.error(f"Ошибка подключения к Elasticsearch: {e}")
             return False
 
     def search_products(
@@ -44,20 +46,22 @@ class ElasticsearchClient:
         """Поиск товаров по терминам"""
 
         if not self.es:
-            self.logger.error("Elasticsearch не подключен")
+            logger.error("Elasticsearch не подключен")
             return {'error': 'ES не подключен', 'candidates': []}
 
         # Проверяем существование индекса
         if not self.es.indices.exists(index=self.index_name):
-            self.logger.error(f"Индекс {self.index_name} не существует")
+            logger.error(f"Индекс {self.index_name} не существует")
             return {'error': f'Индекс {self.index_name} не существует', 'candidates': []}
 
         # Строим запрос
         query = self.query_builder.build_tender_query(search_terms)
+        logger.info(f"Построен запрос для индекса {self.index_name}")
 
         # Добавляем фильтры если есть
         if filters:
             query = self.query_builder.add_filters(query, filters)
+            logger.info(f"Добавлены фильтры: {list(filters.keys())}")
 
         # Устанавливаем размер выборки
         if size:
@@ -65,11 +69,14 @@ class ElasticsearchClient:
         else:
             query['size'] = settings.MAX_SEARCH_RESULTS
 
+        logger.info(f"Размер выборки: {query['size']}")
+
         # Указываем какие поля возвращать
         query['_source'] = ["title", "category", "brand", "attributes"]
 
         try:
             # Выполняем поиск
+            logger.info("Выполнение поиска в Elasticsearch...")
             response = self.es.search(index=self.index_name, body=query)
 
             # Обрабатываем результаты
@@ -83,15 +90,15 @@ class ElasticsearchClient:
                 'query_type': 'tender_search'
             }
 
-            self.logger.info(
-                f"Найдено: {len(candidates)} из {result['total_found']} "
+            logger.info(
+                f"Поиск завершен: найдено {len(candidates)} из {result['total_found']} товаров "
                 f"(макс. скор: {result['max_score']:.2f})"
             )
 
             return result
 
         except Exception as e:
-            self.logger.error(f"Ошибка при выполнении поиска: {e}", exc_info=True)
+            logger.error(f"Ошибка при выполнении поиска: {e}", exc_info=True)
             return {'error': str(e), 'candidates': []}
 
     def _process_search_results(self, response: Dict) -> List[Dict]:
@@ -135,7 +142,7 @@ class ElasticsearchClient:
                 }
 
         except Exception as e:
-            self.logger.error(f"Ошибка получения товара {product_id}: {e}")
+            logger.error(f"Ошибка получения товара {product_id}: {e}")
 
         return None
 

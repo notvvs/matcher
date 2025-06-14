@@ -8,6 +8,9 @@ from app.core.constants import IGNORE_VALUES
 from app.services.extraction.term_weighter import TermWeighter
 from app.services.extraction.text_cleaner import TextCleaner
 
+# Используем стандартный логгер
+logger = logging.getLogger(__name__)
+
 
 class TermExtractor:
     """Извлечение и обработка терминов из тендера"""
@@ -23,22 +26,31 @@ class TermExtractor:
         self.term_weighter = term_weighter
         self.synonyms_manager = synonyms_manager
         self.important_chars = important_chars
-        self.logger = logging.getLogger(__name__)
 
     def extract_from_tender(self, tender: Dict) -> Dict:
         """Главный метод извлечения терминов"""
 
+        logger.info(f"Начало извлечения терминов из тендера: {tender.get('name', '')}")
+
         # 1. Извлекаем сырые термины
         raw_terms = self._extract_raw_terms(tender)
+        logger.info(f"Извлечено сырых терминов: название={len(raw_terms['name_terms'])}, "
+                    f"характеристики={len(raw_terms['char_names'])}, "
+                    f"значения={len(raw_terms['char_values'])}")
 
         # 2. Классифицируем термины
         classified = self._classify_terms(raw_terms)
+        logger.info(f"Классифицировано терминов: primary={len(classified['primary'])}, "
+                    f"secondary={len(classified['secondary'])}, "
+                    f"tertiary={len(classified['tertiary'])}")
 
         # 3. Расширяем синонимами
         expanded = self._expand_with_synonyms(classified)
+        logger.info("Термины расширены синонимами")
 
         # 4. Сохраняем оригинальные термины для определения синонимов
         original_terms = self._get_original_terms(tender)
+        logger.info(f"Оригинальных терминов: {len(original_terms)}")
 
         # 5. Рассчитываем веса
         boost_terms = self.term_weighter.calculate_weights(
@@ -46,6 +58,7 @@ class TermExtractor:
             expanded,
             original_terms
         )
+        logger.info(f"Рассчитаны веса для {len(boost_terms)} терминов")
 
         # 6. Формируем результат
         result = {
@@ -67,6 +80,7 @@ class TermExtractor:
             }
         }
 
+        logger.info(f"Извлечение завершено. Поисковый запрос: '{result['search_query']}'")
         return result
 
     def _extract_raw_terms(self, tender: Dict) -> Dict[str, List[str]]:
@@ -127,6 +141,8 @@ class TermExtractor:
 
         for category, terms in classified.items():
             expanded[category] = self.synonyms_manager.expand_with_synonyms(terms)
+            if len(expanded[category]) > len(terms):
+                logger.info(f"Категория '{category}': добавлено {len(expanded[category]) - len(terms)} синонимов")
 
         return expanded
 

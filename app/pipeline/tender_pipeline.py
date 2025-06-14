@@ -8,6 +8,9 @@ from app.services.search.elasticsearch_client import ElasticsearchClient
 from app.services.filtering.semantic_filter import SemanticFilter
 from app.services.filtering.score_combiner import ScoreCombiner
 
+# Используем стандартный логгер
+logger = logging.getLogger(__name__)
+
 
 class TenderProcessingPipeline:
     """Пайплайн для обработки тендеров через все этапы"""
@@ -23,7 +26,6 @@ class TenderProcessingPipeline:
         self.es_client = es_client
         self.semantic_filter = semantic_filter
         self.score_combiner = score_combiner
-        self.logger = logging.getLogger(__name__)
 
     def process(self, tender: Dict) -> Dict:
         """
@@ -36,7 +38,8 @@ class TenderProcessingPipeline:
         start_time = time.time()
         tender_name = tender.get('name', 'Без названия')
 
-        self.logger.info(f"Начало обработки тендера: {tender_name}")
+        logger.info(f"Начало обработки тендера: {tender_name}")
+        logger.info(f"Характеристик в тендере: {len(tender.get('characteristics', []))}")
 
         # Инициализируем результат
         result = {
@@ -67,7 +70,7 @@ class TenderProcessingPipeline:
             candidates = stage2_result['candidates']
 
             if not candidates:
-                self.logger.warning("Поиск не дал результатов")
+                logger.warning("Поиск не дал результатов")
                 return result
 
             # Этап 3: Семантическая фильтрация
@@ -88,7 +91,7 @@ class TenderProcessingPipeline:
 
             result['statistics'] = self._calculate_statistics(result, total_time)
 
-            self.logger.info(
+            logger.info(
                 f"Обработка завершена: найдено {len(final_products)} товаров "
                 f"за {total_time:.2f}с"
             )
@@ -97,7 +100,7 @@ class TenderProcessingPipeline:
             self._log_top_results(final_products)
 
         except Exception as e:
-            self.logger.error(f"Критическая ошибка в пайплайне: {e}", exc_info=True)
+            logger.error(f"Критическая ошибка в пайплайне: {e}", exc_info=True)
             result['error'] = str(e)
 
         return result
@@ -105,7 +108,7 @@ class TenderProcessingPipeline:
     def _execute_extraction(self, tender: Dict) -> Dict:
         """Этап 1: Извлечение терминов"""
 
-        self.logger.info("Этап 1: Извлечение терминов")
+        logger.info("Этап 1: Извлечение терминов")
         start_time = time.time()
 
         try:
@@ -113,9 +116,10 @@ class TenderProcessingPipeline:
 
             execution_time = time.time() - start_time
 
-            self.logger.info(f"Извлечено терминов: {len(search_terms['boost_terms'])}")
-            self.logger.info(f"Основной запрос: '{search_terms['search_query']}'")
-            self.logger.info(f"Время: {execution_time:.2f}с")
+            logger.info(f"Извлечено терминов: {len(search_terms['boost_terms'])}")
+            logger.info(f"Основной запрос: '{search_terms['search_query']}'")
+            logger.info(f"Boost термины: {list(search_terms['boost_terms'].keys())}")
+            logger.info(f"Время извлечения: {execution_time:.2f}с")
 
             return {
                 'search_terms': search_terms,
@@ -125,18 +129,19 @@ class TenderProcessingPipeline:
             }
 
         except Exception as e:
-            self.logger.error(f"Ошибка извлечения терминов: {e}", exc_info=True)
+            logger.error(f"Ошибка извлечения терминов: {e}", exc_info=True)
             return {'error': str(e), 'execution_time': time.time() - start_time}
 
     def _execute_search(self, search_terms: Dict) -> Dict:
         """Этап 2: Поиск в Elasticsearch"""
 
-        self.logger.info("Этап 2: Поиск в Elasticsearch")
+        logger.info("Этап 2: Поиск в Elasticsearch")
         start_time = time.time()
 
         try:
-            self.logger.info(f"Поисковый запрос: '{search_terms['search_query']}'")
-            self.logger.info(f"Boost-терминов: {len(search_terms['boost_terms'])}")
+            logger.info(f"Поисковый запрос: '{search_terms['search_query']}'")
+            logger.info(f"Количество boost-терминов: {len(search_terms['boost_terms'])}")
+            logger.info(f"Boost-термины и веса: {search_terms['boost_terms']}")
 
             es_results = self.es_client.search_products(
                 search_terms,
@@ -153,9 +158,15 @@ class TenderProcessingPipeline:
 
             candidates = es_results.get('candidates', [])
 
-            self.logger.info(f"Найдено: {len(candidates)} из {es_results['total_found']}")
-            self.logger.info(f"Максимальный скор: {es_results.get('max_score', 0):.2f}")
-            self.logger.info(f"Время: {execution_time:.2f}с")
+            logger.info(f"Найдено товаров: {len(candidates)} из {es_results['total_found']}")
+            logger.info(f"Максимальный ES скор: {es_results.get('max_score', 0):.2f}")
+            logger.info(f"Время поиска: {execution_time:.2f}с")
+
+            # Логируем примеры найденных товаров
+            if candidates:
+                logger.info("Примеры найденных товаров (топ-3):")
+                for i, candidate in enumerate(candidates[:3]):
+                    logger.info(f"  {i+1}. {candidate.get('title', '')[:80]}... (ES скор: {candidate.get('elasticsearch_score', 0):.2f})")
 
             return {
                 'candidates': candidates,
@@ -166,18 +177,18 @@ class TenderProcessingPipeline:
             }
 
         except Exception as e:
-            self.logger.error(f"Ошибка поиска: {e}", exc_info=True)
+            logger.error(f"Ошибка поиска: {e}", exc_info=True)
             return {'error': str(e), 'execution_time': time.time() - start_time}
 
     def _execute_filtering(self, tender: Dict, candidates: List[Dict]) -> Dict:
         """Этап 3: Семантическая фильтрация и комбинирование скоров"""
 
-        self.logger.info("Этап 3: Семантическая фильтрация")
+        logger.info("Этап 3: Семантическая фильтрация и скоринг")
         start_time = time.time()
 
         try:
-            self.logger.info(f"Товаров для обработки: {len(candidates)}")
-            self.logger.info(f"Порог близости: {settings.SEMANTIC_THRESHOLD}")
+            logger.info(f"Товаров для семантической обработки: {len(candidates)}")
+            logger.info(f"Порог семантической близости: {settings.SEMANTIC_THRESHOLD}")
 
             # Семантическая фильтрация
             filtered = self.semantic_filter.filter_by_similarity(
@@ -187,16 +198,16 @@ class TenderProcessingPipeline:
                 top_k=settings.SEMANTIC_MAX_CANDIDATES
             )
 
-            self.logger.info(f"После фильтрации: {len(filtered)} товаров")
+            logger.info(f"После семантической фильтрации: {len(filtered)} товаров")
 
             # Комбинирование скоров
-            self.logger.info("Комбинирование скоров...")
+            logger.info("Комбинирование ES и семантических скоров...")
             filtered = self.score_combiner.combine_scores(filtered)
 
             execution_time = time.time() - start_time
 
-            self.logger.info(f"Отфильтровано: {len(filtered)} из {len(candidates)}")
-            self.logger.info(f"Время: {execution_time:.2f}с")
+            logger.info(f"Финальная фильтрация: {len(filtered)} из {len(candidates)} товаров")
+            logger.info(f"Время фильтрации: {execution_time:.2f}с")
 
             return {
                 'filtered_products': filtered,
@@ -207,7 +218,7 @@ class TenderProcessingPipeline:
             }
 
         except Exception as e:
-            self.logger.error(f"Ошибка фильтрации: {e}", exc_info=True)
+            logger.error(f"Ошибка фильтрации: {e}", exc_info=True)
             return {'error': str(e), 'execution_time': time.time() - start_time}
 
     def _calculate_statistics(self, result: Dict, total_time: float) -> Dict:
@@ -231,10 +242,10 @@ class TenderProcessingPipeline:
         if not products:
             return
 
-        self.logger.info(f"Топ-{top_n} результатов:")
+        logger.info(f"Топ-{top_n} финальных результатов:")
 
         for i, product in enumerate(products[:top_n], 1):
-            self.logger.info(
+            logger.info(
                 f"  {i}. {product.get('title', 'Без названия')} "
-                f"(скор: {product.get('combined_score', 0):.3f})"
+                f"(финальный скор: {product.get('combined_score', 0):.3f})"
             )

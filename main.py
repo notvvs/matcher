@@ -1,17 +1,46 @@
 import time
 import json
 import argparse
+import logging
+import sys
 from pathlib import Path
 from typing import Dict, Any
 
 from app.pipeline.factory import create_pipeline
-from app.utils.logger import setup_logger
+
+
+def setup_logging():
+    """Настройка логирования через стандартную библиотеку"""
+
+    # Создаем директорию для логов
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+
+    # Настраиваем корневой логгер
+    logging.basicConfig(
+        level=logging.INFO,  # Устанавливаем INFO уровень
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            # Вывод в консоль
+            logging.StreamHandler(sys.stdout),
+            # Запись в файл
+            logging.FileHandler(log_dir / 'matcher.log', encoding='utf-8')
+        ]
+    )
+
+    # Уменьшаем уровень логирования для шумных библиотек
+    logging.getLogger('elasticsearch').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+    logging.getLogger('transformers').setLevel(logging.WARNING)
+    logging.getLogger('torch').setLevel(logging.WARNING)
 
 
 def process_tender_example():
     """Обработка примера тендера"""
 
-    logger = setup_logger(__name__)
+    logger = logging.getLogger(__name__)
 
     # Пример тендера
     tender = {
@@ -67,7 +96,7 @@ def process_tender_example():
 def process_tender_file(filename: str):
     """Обработка тендера из файла"""
 
-    logger = setup_logger(__name__)
+    logger = logging.getLogger(__name__)
 
     try:
         # Загружаем тендер из файла
@@ -103,7 +132,9 @@ def process_tender_file(filename: str):
 def print_results_summary(result: Dict[str, Any]):
     """Выводит краткую сводку результатов"""
 
-    print("\nРЕЗУЛЬТАТЫ ОБРАБОТКИ ТЕНДЕРА")
+    print("\n" + "=" * 60)
+    print("РЕЗУЛЬТАТЫ ОБРАБОТКИ ТЕНДЕРА")
+    print("=" * 60)
 
     # Информация о тендере
     tender = result.get('tender', {})
@@ -147,11 +178,14 @@ def print_results_summary(result: Dict[str, Any]):
             print(f"     Категория: {product.get('category', 'Н/Д')}")
             print(f"     Скор: {product.get('combined_score', 0):.3f}")
 
-    print()
+    print("=" * 60 + "\n")
 
 
 def main():
     """Главная функция"""
+
+    # НАСТРАИВАЕМ ЛОГИРОВАНИЕ В САМОМ НАЧАЛЕ
+    setup_logging()
 
     parser = argparse.ArgumentParser(
         description="Система поиска товаров для тендеров"

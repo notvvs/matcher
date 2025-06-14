@@ -10,18 +10,21 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from app.core.settings import settings
 
+# Используем стандартный логгер
+logger = logging.getLogger(__name__)
+
 
 class SemanticFilter:
     """Фильтрация товаров по семантической близости"""
 
     def __init__(self, model_name: str = None):
-        self.logger = logging.getLogger(__name__)
         self.model_name = model_name or settings.EMBEDDINGS_MODEL
 
         # Загружаем модель
-        self.logger.info(f"Загрузка модели {self.model_name}...")
+        logger.info(f"Загрузка семантической модели {self.model_name}...")
         self.model = SentenceTransformer(self.model_name)
         self.model.max_seq_length = 512
+        logger.info("Семантическая модель загружена")
 
         # Паттерн для очистки значений
         self.clean_pattern = re.compile(r'[≥≤<>]=?')
@@ -36,7 +39,7 @@ class SemanticFilter:
         """Фильтрует товары по семантической близости к тендеру"""
 
         if not products:
-            self.logger.warning("Нет товаров для фильтрации")
+            logger.warning("Нет товаров для фильтрации")
             return []
 
         # Используем порог из настроек если не указан
@@ -47,6 +50,8 @@ class SemanticFilter:
 
         # Создаем текстовые представления
         tender_text = self._create_tender_text(tender)
+        logger.info(f"Текст тендера для эмбеддинга: '{tender_text[:100]}...'")
+
         product_texts = []
         valid_products = []
 
@@ -57,15 +62,15 @@ class SemanticFilter:
                     product_texts.append(text)
                     valid_products.append(product)
             except Exception as e:
-                self.logger.error(f"Ошибка обработки товара: {e}")
+                logger.error(f"Ошибка обработки товара: {e}")
                 continue
 
         if not product_texts:
-            self.logger.warning("Не удалось создать тексты для товаров")
+            logger.warning("Не удалось создать тексты для товаров")
             return []
 
         # Вычисляем эмбеддинги
-        self.logger.info(f"Вычисление эмбеддингов для {len(product_texts)} товаров...")
+        logger.info(f"Вычисление эмбеддингов для {len(product_texts)} товаров...")
 
         with torch.no_grad():
             tender_embedding = self.model.encode([tender_text], convert_to_numpy=True)
@@ -80,15 +85,16 @@ class SemanticFilter:
                 batch_embeddings = self.model.encode(batch, convert_to_numpy=True)
                 product_embeddings.append(batch_embeddings)
 
-                # Логируем прогресс
-                if batch_num % 5 == 0 or batch_num == total_batches - 1:
+                # Логируем прогресс каждые 10%
+                if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches - 1:
                     progress = min(i + batch_size, len(product_texts))
                     percent = (progress / len(product_texts)) * 100
-                    self.logger.info(f"Обработано: {progress}/{len(product_texts)} ({percent:.0f}%)")
+                    logger.info(f"Обработано эмбеддингов: {progress}/{len(product_texts)} ({percent:.0f}%)")
 
             product_embeddings = np.vstack(product_embeddings)
 
         # Вычисляем схожесть
+        logger.info("Вычисление семантической схожести...")
         similarities = cosine_similarity(tender_embedding, product_embeddings)[0]
 
         # Фильтруем по порогу
@@ -108,10 +114,17 @@ class SemanticFilter:
 
         elapsed_time = time.time() - start_time
 
-        self.logger.info(
-            f"Семантическая фильтрация: {len(filtered_products)} из {len(products)} "
-            f"за {elapsed_time:.2f}с (порог: {threshold})"
+        logger.info(
+            f"Семантическая фильтрация завершена: {len(filtered_products)} из {len(products)} товаров "
+            f"прошли порог {threshold:.2f} за {elapsed_time:.2f}с"
         )
+
+        # Логируем примеры с высокой схожестью
+        if filtered_products:
+            logger.info("Примеры товаров с высокой семантической схожестью:")
+            for i, product in enumerate(filtered_products[:3]):
+                logger.info(
+                    f"  {i + 1}. {product.get('title', '')[:60]}... (схожесть: {product['semantic_score']:.3f})")
 
         return filtered_products
 
