@@ -19,7 +19,7 @@ class SemanticFilter:
         self.model_name = model_name or settings.EMBEDDINGS_MODEL
 
         # Загружаем модель
-        self.logger.info(f"Загрузка семантической модели {self.model_name}...")
+        self.logger.info(f"Загрузка модели {self.model_name}...")
         self.model = SentenceTransformer(self.model_name)
         self.model.max_seq_length = 512
 
@@ -65,17 +65,26 @@ class SemanticFilter:
             return []
 
         # Вычисляем эмбеддинги
+        self.logger.info(f"Вычисление эмбеддингов для {len(product_texts)} товаров...")
+
         with torch.no_grad():
             tender_embedding = self.model.encode([tender_text], convert_to_numpy=True)
 
             # Батчевая обработка для эффективности
             batch_size = settings.SEMANTIC_BATCH_SIZE
             product_embeddings = []
+            total_batches = (len(product_texts) + batch_size - 1) // batch_size
 
-            for i in range(0, len(product_texts), batch_size):
+            for batch_num, i in enumerate(range(0, len(product_texts), batch_size)):
                 batch = product_texts[i:i + batch_size]
                 batch_embeddings = self.model.encode(batch, convert_to_numpy=True)
                 product_embeddings.append(batch_embeddings)
+
+                # Логируем прогресс
+                if batch_num % 5 == 0 or batch_num == total_batches - 1:
+                    progress = min(i + batch_size, len(product_texts))
+                    percent = (progress / len(product_texts)) * 100
+                    self.logger.info(f"Обработано: {progress}/{len(product_texts)} ({percent:.0f}%)")
 
             product_embeddings = np.vstack(product_embeddings)
 

@@ -103,9 +103,7 @@ def process_tender_file(filename: str):
 def print_results_summary(result: Dict[str, Any]):
     """Выводит краткую сводку результатов"""
 
-    print("\n" + "="*60)
-    print("РЕЗУЛЬТАТЫ ОБРАБОТКИ ТЕНДЕРА")
-    print("="*60)
+    print("\nРЕЗУЛЬТАТЫ ОБРАБОТКИ ТЕНДЕРА")
 
     # Информация о тендере
     tender = result.get('tender', {})
@@ -118,28 +116,28 @@ def print_results_summary(result: Dict[str, Any]):
     if 'extraction' in stages:
         extraction = stages['extraction']
         print(f"\nИзвлечение терминов:")
-        print(f"  - Boost терминов: {extraction.get('boost_terms_count', 0)}")
-        print(f"  - Время: {extraction.get('execution_time', 0):.2f}с")
+        print(f"  Boost терминов: {extraction.get('boost_terms_count', 0)}")
+        print(f"  Время: {extraction.get('execution_time', 0):.2f}с")
 
     if 'elasticsearch' in stages:
         es_stage = stages['elasticsearch']
         print(f"\nПоиск в Elasticsearch:")
-        print(f"  - Найдено всего: {es_stage.get('total_found', 0)}")
-        print(f"  - Получено кандидатов: {es_stage.get('candidates_retrieved', 0)}")
-        print(f"  - Время: {es_stage.get('execution_time', 0):.2f}с")
+        print(f"  Найдено всего: {es_stage.get('total_found', 0)}")
+        print(f"  Получено кандидатов: {es_stage.get('candidates_retrieved', 0)}")
+        print(f"  Время: {es_stage.get('execution_time', 0):.2f}с")
 
     if 'semantic' in stages:
         semantic = stages['semantic']
         print(f"\nСемантическая фильтрация:")
-        print(f"  - Входных товаров: {semantic.get('input_products', 0)}")
-        print(f"  - После фильтрации: {semantic.get('filtered_products_count', 0)}")
-        print(f"  - Время: {semantic.get('execution_time', 0):.2f}с")
+        print(f"  Входных товаров: {semantic.get('input_products', 0)}")
+        print(f"  После фильтрации: {semantic.get('filtered_products_count', 0)}")
+        print(f"  Время: {semantic.get('execution_time', 0):.2f}с")
 
     # Финальные результаты
     final_products = result.get('final_products', [])
     print(f"\nФинальные результаты:")
-    print(f"  - Найдено товаров: {len(final_products)}")
-    print(f"  - Общее время: {result.get('execution_time', 0):.2f}с")
+    print(f"  Найдено товаров: {len(final_products)}")
+    print(f"  Общее время: {result.get('execution_time', 0):.2f}с")
 
     # Топ-5 товаров
     if final_products:
@@ -149,7 +147,7 @@ def print_results_summary(result: Dict[str, Any]):
             print(f"     Категория: {product.get('category', 'Н/Д')}")
             print(f"     Скор: {product.get('combined_score', 0):.3f}")
 
-    print("="*60 + "\n")
+    print()
 
 
 def main():

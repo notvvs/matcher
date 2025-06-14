@@ -105,7 +105,7 @@ class TenderProcessingPipeline:
     def _execute_extraction(self, tender: Dict) -> Dict:
         """Этап 1: Извлечение терминов"""
 
-        self.logger.info("Этап 1: Извлечение терминов...")
+        self.logger.info("Этап 1: Извлечение терминов")
         start_time = time.time()
 
         try:
@@ -113,10 +113,9 @@ class TenderProcessingPipeline:
 
             execution_time = time.time() - start_time
 
-            self.logger.info(
-                f"Извлечено терминов: {len(search_terms['boost_terms'])}, "
-                f"время: {execution_time:.2f}с"
-            )
+            self.logger.info(f"Извлечено терминов: {len(search_terms['boost_terms'])}")
+            self.logger.info(f"Основной запрос: '{search_terms['search_query']}'")
+            self.logger.info(f"Время: {execution_time:.2f}с")
 
             return {
                 'search_terms': search_terms,
@@ -132,10 +131,13 @@ class TenderProcessingPipeline:
     def _execute_search(self, search_terms: Dict) -> Dict:
         """Этап 2: Поиск в Elasticsearch"""
 
-        self.logger.info("Этап 2: Поиск в Elasticsearch...")
+        self.logger.info("Этап 2: Поиск в Elasticsearch")
         start_time = time.time()
 
         try:
+            self.logger.info(f"Поисковый запрос: '{search_terms['search_query']}'")
+            self.logger.info(f"Boost-терминов: {len(search_terms['boost_terms'])}")
+
             es_results = self.es_client.search_products(
                 search_terms,
                 size=settings.MAX_SEARCH_RESULTS
@@ -151,10 +153,9 @@ class TenderProcessingPipeline:
 
             candidates = es_results.get('candidates', [])
 
-            self.logger.info(
-                f"Найдено: {len(candidates)} из {es_results['total_found']}, "
-                f"время: {execution_time:.2f}с"
-            )
+            self.logger.info(f"Найдено: {len(candidates)} из {es_results['total_found']}")
+            self.logger.info(f"Максимальный скор: {es_results.get('max_score', 0):.2f}")
+            self.logger.info(f"Время: {execution_time:.2f}с")
 
             return {
                 'candidates': candidates,
@@ -171,10 +172,13 @@ class TenderProcessingPipeline:
     def _execute_filtering(self, tender: Dict, candidates: List[Dict]) -> Dict:
         """Этап 3: Семантическая фильтрация и комбинирование скоров"""
 
-        self.logger.info("Этап 3: Семантическая фильтрация...")
+        self.logger.info("Этап 3: Семантическая фильтрация")
         start_time = time.time()
 
         try:
+            self.logger.info(f"Товаров для обработки: {len(candidates)}")
+            self.logger.info(f"Порог близости: {settings.SEMANTIC_THRESHOLD}")
+
             # Семантическая фильтрация
             filtered = self.semantic_filter.filter_by_similarity(
                 tender,
@@ -183,15 +187,16 @@ class TenderProcessingPipeline:
                 top_k=settings.SEMANTIC_MAX_CANDIDATES
             )
 
+            self.logger.info(f"После фильтрации: {len(filtered)} товаров")
+
             # Комбинирование скоров
+            self.logger.info("Комбинирование скоров...")
             filtered = self.score_combiner.combine_scores(filtered)
 
             execution_time = time.time() - start_time
 
-            self.logger.info(
-                f"Отфильтровано: {len(filtered)} из {len(candidates)}, "
-                f"время: {execution_time:.2f}с"
-            )
+            self.logger.info(f"Отфильтровано: {len(filtered)} из {len(candidates)}")
+            self.logger.info(f"Время: {execution_time:.2f}с")
 
             return {
                 'filtered_products': filtered,
@@ -226,7 +231,7 @@ class TenderProcessingPipeline:
         if not products:
             return
 
-        self.logger.info(f"Топ-{top_n} результата:")
+        self.logger.info(f"Топ-{top_n} результатов:")
 
         for i, product in enumerate(products[:top_n], 1):
             self.logger.info(
