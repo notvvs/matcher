@@ -18,7 +18,7 @@ class DeliveryInfo(BaseModel):
 class PaymentInfo(BaseModel):
     paymentTerm: str
     paymentMethod: str
-    paymentConditions: str
+    paymentConditions: Optional[str] = None
 
 
 class TenderInfo(BaseModel):
@@ -48,7 +48,7 @@ class TenderItem(BaseModel):
     id: int
     name: str
     okpd2Code: str
-    ktruCode: str
+    ktruCode: Optional[str] = None
     quantity: float
     unitOfMeasurement: str
     unitPrice: Price
@@ -146,76 +146,3 @@ class HealthCheckResponse(BaseModel):
     elasticsearch: str
     pipeline: str
     timestamp: datetime = Field(default_factory=datetime.now)
-
-
-# Модели с валидацией для демонстрации (если понадобится)
-class CharacteristicModelValidated(BaseModel):
-    """Модель характеристики тендера с валидацией"""
-    name: str = Field(..., description="Название характеристики", min_length=1)
-    value: str = Field(..., description="Значение характеристики", min_length=1)
-    type: Optional[str] = Field(
-        "Качественная",
-        description="Тип характеристики"
-    )
-    required: bool = Field(
-        True,
-        description="Обязательная ли характеристика"
-    )
-
-    @field_validator('name', 'value')
-    @classmethod
-    def validate_not_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError('Поле не может быть пустым')
-        return v.strip()
-
-
-class TenderRequestValidated(BaseModel):
-    """Модель входящего тендера с валидацией"""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "name": "Блокнот",
-                "characteristics": [
-                    {
-                        "name": "Вид линовки",
-                        "value": "Клетка",
-                        "type": "Качественная",
-                        "required": True
-                    },
-                    {
-                        "name": "Количество листов",
-                        "value": "≥ 40 ШТ",
-                        "type": "Количественная",
-                        "required": True
-                    }
-                ]
-            }
-        }
-    )
-
-    name: str = Field(
-        ...,
-        description="Название тендера/товара",
-        min_length=1,
-        max_length=500
-    )
-    characteristics: List[CharacteristicModelValidated] = Field(
-        ...,
-        description="Список характеристик товара",
-        min_length=1
-    )
-
-    @field_validator('name')
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError('Название тендера не может быть пустым')
-        return v.strip()
-
-    @field_validator('characteristics')
-    @classmethod
-    def validate_has_required(cls, v: List[CharacteristicModelValidated]) -> List[CharacteristicModelValidated]:
-        if not any(char.required for char in v):
-            raise ValueError('Должна быть хотя бы одна обязательная характеристика')
-        return v
