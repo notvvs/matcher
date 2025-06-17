@@ -6,17 +6,13 @@ from pathlib import Path
 def setup_logger(name: str) -> logging.Logger:
     """Настройка базового логгера"""
 
-    # Создаем директорию для логов
-    log_dir = Path('logs')
-    log_dir.mkdir(exist_ok=True)
-
-    # Создаем логгер
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
 
-    # Убираем дублирование
+    # Избегаем дублирования обработчиков
     if logger.handlers:
         return logger
+
+    logger.setLevel(logging.INFO)
 
     # Формат логов
     formatter = logging.Formatter(
@@ -30,22 +26,15 @@ def setup_logger(name: str) -> logging.Logger:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # Файл для всех логов
-    file_handler = logging.FileHandler(
-        log_dir / 'matcher.log',
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    # Файл для ошибок
-    error_handler = logging.FileHandler(
-        log_dir / 'errors.log',
-        encoding='utf-8'
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(formatter)
-    logger.addHandler(error_handler)
+    # Файловый вывод (опционально)
+    log_dir = Path('logs')
+    if log_dir.exists():
+        file_handler = logging.FileHandler(
+            log_dir / 'app.log',
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger

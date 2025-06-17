@@ -5,7 +5,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import math
 
 from app.core.settings import settings
 
@@ -13,13 +12,13 @@ from app.core.settings import settings
 @dataclass
 class LLMConfig:
     """Конфигурация для LLM"""
-    model_name: str = "mistral:7b"
+    model_name: str = "llama3.2:1b"
     api_url: str = "http://localhost:11434/api/generate"
     temperature: float = 0.1
-    max_tokens: int = 1000  # Увеличено для батчей
-    timeout: int = 60  # Увеличено для батчей
+    max_tokens: int = 1000
+    timeout: int = 60
     max_workers: int = 4
-    batch_size: int = 5  # Количество товаров в одном батче
+    batch_size: int = 5
 
 
 class LLMFilter:
@@ -28,19 +27,6 @@ class LLMFilter:
     def __init__(self, config: Optional[LLMConfig] = None):
         self.logger = logging.getLogger(__name__)
         self.config = config or LLMConfig()
-
-        # Счетчики для отладки
-        self.debug_stats = {
-            'total_analyzed': 0,
-            'passed_threshold': 0,
-            'failed_threshold': 0,
-            'errors': 0,
-            'scores_distribution': [],
-            'batches_processed': 0,
-            'batch_times': []
-        }
-
-        # Проверяем доступность Ollama при инициализации
         self._check_ollama_availability()
 
     def _check_ollama_availability(self):
@@ -78,67 +64,32 @@ class LLMFilter:
 
         start_time = time.time()
         self.logger.info(
-            f"Начало батчевого LLM анализа для {len(products)} товаров "
-            f"с порогом {threshold} (размер батча: {self.config.batch_size})"
+            f"LLM анализ для {len(products)} товаров "
+            f"(порог: {threshold}, размер батча: {self.config.batch_size})"
         )
-
-        # Сбрасываем статистику
-        self.debug_stats = {
-            'total_analyzed': 0,
-            'passed_threshold': 0,
-            'failed_threshold': 0,
-            'errors': 0,
-            'scores_distribution': [],
-            'batches_processed': 0,
-            'batch_times': []
-        }
 
         # Подготавливаем данные тендера
         tender_requirements = self._prepare_tender_requirements(tender)
-        self.logger.debug(f"Требования тендера:\n{tender_requirements}")
 
         # Ограничиваем количество товаров для анализа
         if len(products) > 100:
-            self.logger.warning(
-                f"Слишком много товаров ({len(products)}), "
-                f"анализируем только первые 100"
-            )
+            self.logger.warning(f"Анализируем только первые 100 товаров из {len(products)}")
             products = products[:100]
 
         # Разбиваем товары на батчи
         batches = self._create_batches(products, self.config.batch_size)
-        self.logger.info(f"Создано {len(batches)} батчей для обработки")
-
-        # Анализируем первый батч для отладки
-        if batches:
-            self.logger.info("Анализируем первый батч для отладки...")
-            first_batch_results = self._analyze_batch(
-                tender_requirements,
-                batches[0],
-                tender.get('name', ''),
-                debug=True
-            )
-            for product_id, (score, reasoning) in first_batch_results.items():
-                self.logger.info(
-                    f"Товар {product_id}: Скор: {score:.2f}, "
-                    f"Причина: {reasoning[:100]}..."
-                )
 
         # Анализируем все батчи
         analyzed_products = []
-        debug_threshold = min(threshold, 0.5)
-        self.logger.warning(f"Используем пониженный порог для отладки: {debug_threshold}")
 
         # Обрабатываем батчи параллельно
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            # Создаем задачи для батчей
             future_to_batch = {
                 executor.submit(
                     self._analyze_batch,
                     tender_requirements,
                     batch,
-                    tender.get('name', ''),
-                    debug=False
+                    tender.get('name', '')
                 ): batch
                 for batch in batches
             }
@@ -146,44 +97,23 @@ class LLMFilter:
             # Обрабатываем результаты по мере готовности
             for future in as_completed(future_to_batch):
                 batch = future_to_batch[future]
-                batch_start = time.time()
 
                 try:
                     batch_results = future.result()
-                    batch_time = time.time() - batch_start
-                    self.debug_stats['batch_times'].append(batch_time)
-                    self.debug_stats['batches_processed'] += 1
 
                     # Обрабатываем результаты батча
                     for product in batch:
                         product_id = product.get('id', '')
                         if product_id in batch_results:
                             score, reasoning = batch_results[product_id]
-                            self.debug_stats['total_analyzed'] += 1
-                            self.debug_stats['scores_distribution'].append(score)
 
-                            if score >= debug_threshold:
+                            if score >= threshold:
                                 product['llm_score'] = score
                                 product['llm_reasoning'] = reasoning
                                 analyzed_products.append(product)
-                                self.debug_stats['passed_threshold'] += 1
-                            else:
-                                self.debug_stats['failed_threshold'] += 1
-
-                    # Логируем прогресс
-                    self.logger.info(
-                        f"Обработано батчей: {self.debug_stats['batches_processed']}/{len(batches)} "
-                        f"(товаров прошли фильтр: {len(analyzed_products)})"
-                    )
 
                 except Exception as e:
-                    self.logger.error(
-                        f"Ошибка анализа батча: {e}"
-                    )
-                    self.debug_stats['errors'] += 1
-
-        # Выводим статистику
-        self._log_debug_stats()
+                    self.logger.error(f"Ошибка анализа батча: {e}")
 
         # Сортируем по LLM скору
         analyzed_products.sort(key=lambda x: x['llm_score'], reverse=True)
@@ -194,25 +124,19 @@ class LLMFilter:
 
         elapsed_time = time.time() - start_time
         self.logger.info(
-            f"Батчевый LLM анализ завершен: {len(analyzed_products)} из {len(products)} "
-            f"прошли порог {debug_threshold} за {elapsed_time:.2f}с"
+            f"LLM анализ завершен: {len(analyzed_products)} из {len(products)} "
+            f"прошли порог {threshold} за {elapsed_time:.2f}с"
         )
 
         return analyzed_products
 
     def _create_batches(self, products: List[Dict], batch_size: int) -> List[List[Dict]]:
         """Разбивает список товаров на батчи"""
-        batches = []
-        for i in range(0, len(products), batch_size):
-            batch = products[i:i + batch_size]
-            batches.append(batch)
-        return batches
+        return [products[i:i + batch_size] for i in range(0, len(products), batch_size)]
 
     def _prepare_tender_requirements(self, tender: Dict) -> str:
         """Подготавливает требования тендера для промпта"""
-
-        requirements = []
-        requirements.append(f"Товар: {tender.get('name', '')}")
+        requirements = [f"Товар: {tender.get('name', '')}"]
 
         # Группируем характеристики по обязательности
         required_chars = []
@@ -237,8 +161,8 @@ class LLMFilter:
 
     def _prepare_batch_descriptions(self, batch: List[Dict]) -> str:
         """Подготавливает описания нескольких товаров для батчевого анализа"""
-
         descriptions = []
+
         for i, product in enumerate(batch):
             desc = [f"ТОВАР {i + 1} (ID: {product.get('id', 'unknown')}):"]
             desc.append(f"Название: {product.get('title', '')}")
@@ -247,7 +171,7 @@ class LLMFilter:
             if product.get('brand'):
                 desc.append(f"Производитель: {product['brand']}")
 
-            # Добавляем ключевые атрибуты (ограничиваем для экономии токенов)
+            # Добавляем ключевые атрибуты
             attributes = product.get('attributes', [])
             if attributes:
                 desc.append("Основные характеристики:")
@@ -267,8 +191,7 @@ class LLMFilter:
             self,
             tender_requirements: str,
             batch: List[Dict],
-            tender_name: str,
-            debug: bool = False
+            tender_name: str
     ) -> Dict[str, Tuple[float, str]]:
         """Анализирует батч товаров за один вызов LLM"""
 
@@ -305,9 +228,6 @@ class LLMFilter:
     ]
 }}"""
 
-        if debug:
-            self.logger.debug(f"Промпт для батча ({len(batch)} товаров):\n{prompt[:1000]}...")
-
         try:
             # Вызываем LLM
             response = requests.post(
@@ -326,12 +246,8 @@ class LLMFilter:
                 result = response.json()
                 llm_response = result.get('response', '{}')
 
-                if debug:
-                    self.logger.debug(f"Ответ LLM для батча: {llm_response[:500]}...")
-
                 # Парсим JSON ответ
                 try:
-                    # Очищаем ответ от возможных артефактов
                     llm_response = llm_response.strip()
                     if llm_response.startswith('```json'):
                         llm_response = llm_response[7:]
@@ -349,7 +265,6 @@ class LLMFilter:
 
                         # Ограничиваем скор диапазоном [0, 1]
                         score = max(0.0, min(1.0, score))
-
                         results[product_id] = (score, reasoning)
 
                     # Добавляем результаты для товаров, которых нет в ответе
@@ -361,11 +276,7 @@ class LLMFilter:
                     return results
 
                 except (json.JSONDecodeError, ValueError) as e:
-                    self.logger.error(
-                        f"Ошибка парсинга ответа LLM для батча: {e}\n"
-                        f"Ответ: {llm_response[:200]}..."
-                    )
-                    # Возвращаем нулевые результаты для всего батча
+                    self.logger.error(f"Ошибка парсинга ответа LLM: {e}")
                     return {
                         product.get('id', ''): (0.0, "Ошибка парсинга")
                         for product in batch
@@ -378,54 +289,14 @@ class LLMFilter:
                 }
 
         except requests.exceptions.Timeout:
-            self.logger.error("Таймаут при вызове LLM для батча")
+            self.logger.error("Таймаут при вызове LLM")
             return {
                 product.get('id', ''): (0.0, "Таймаут")
                 for product in batch
             }
         except Exception as e:
-            self.logger.error(f"Ошибка при вызове LLM для батча: {e}")
+            self.logger.error(f"Ошибка при вызове LLM: {e}")
             return {
                 product.get('id', ''): (0.0, f"Ошибка: {str(e)}")
                 for product in batch
             }
-
-    def _log_debug_stats(self):
-        """Выводит отладочную статистику"""
-
-        self.logger.info("=" * 50)
-        self.logger.info("СТАТИСТИКА БАТЧЕВОГО LLM АНАЛИЗА:")
-        self.logger.info(f"Всего проанализировано: {self.debug_stats['total_analyzed']}")
-        self.logger.info(f"Прошли порог: {self.debug_stats['passed_threshold']}")
-        self.logger.info(f"Не прошли порог: {self.debug_stats['failed_threshold']}")
-        self.logger.info(f"Ошибок: {self.debug_stats['errors']}")
-        self.logger.info(f"Батчей обработано: {self.debug_stats['batches_processed']}")
-
-        if self.debug_stats['batch_times']:
-            avg_batch_time = sum(self.debug_stats['batch_times']) / len(self.debug_stats['batch_times'])
-            self.logger.info(f"Среднее время на батч: {avg_batch_time:.2f}с")
-
-        if self.debug_stats['scores_distribution']:
-            scores = self.debug_stats['scores_distribution']
-            avg_score = sum(scores) / len(scores)
-            min_score = min(scores)
-            max_score = max(scores)
-
-            self.logger.info(f"Средний скор: {avg_score:.3f}")
-            self.logger.info(f"Мин/Макс скор: {min_score:.3f} / {max_score:.3f}")
-
-            # Распределение по диапазонам
-            ranges = {
-                '0.0-0.3': sum(1 for s in scores if s <= 0.3),
-                '0.3-0.5': sum(1 for s in scores if 0.3 < s <= 0.5),
-                '0.5-0.7': sum(1 for s in scores if 0.5 < s <= 0.7),
-                '0.7-1.0': sum(1 for s in scores if s > 0.7)
-            }
-
-            self.logger.info("Распределение скоров:")
-            for range_name, count in ranges.items():
-                if scores:
-                    percent = (count / len(scores)) * 100
-                    self.logger.info(f"  {range_name}: {count} ({percent:.1f}%)")
-
-        self.logger.info("=" * 50)

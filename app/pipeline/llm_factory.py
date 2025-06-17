@@ -1,5 +1,4 @@
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from app.core.settings import settings
 from app.core.config_loader import ConfigLoader
@@ -26,15 +25,8 @@ def create_llm_pipeline(llm_config: Optional[LLMConfig] = None) -> LLMTenderProc
     config_loader = ConfigLoader(settings.DATA_DIR)
 
     # Создаем менеджеры
-    stopwords_manager = StopwordsManager.from_file(
-        settings.DATA_DIR,
-        'stopwords.txt'
-    )
-
-    synonyms_manager = SynonymsManager.from_file(
-        settings.DATA_DIR,
-        'synonyms.txt'
-    )
+    stopwords_manager = StopwordsManager.from_file(settings.DATA_DIR, 'stopwords.txt')
+    synonyms_manager = SynonymsManager.from_file(settings.DATA_DIR, 'synonyms.txt')
 
     # Загружаем важные характеристики
     important_chars = config_loader.load_set('important_chars.txt')
@@ -42,7 +34,6 @@ def create_llm_pipeline(llm_config: Optional[LLMConfig] = None) -> LLMTenderProc
     # Создаем компоненты извлечения
     text_cleaner = TextCleaner(stopwords_manager)
     term_weighter = TermWeighter(synonyms_manager)
-
     term_extractor = TermExtractor(
         text_cleaner=text_cleaner,
         term_weighter=term_weighter,
@@ -63,40 +54,19 @@ def create_llm_pipeline(llm_config: Optional[LLMConfig] = None) -> LLMTenderProc
             max_tokens=settings.LLM_MAX_TOKENS,
             timeout=settings.LLM_TIMEOUT,
             max_workers=settings.LLM_MAX_WORKERS,
-            batch_size=settings.LLM_BATCH_SIZE  # Добавлено
+            batch_size=settings.LLM_BATCH_SIZE
         )
 
     llm_filter = LLMFilter(llm_config)
-
     score_combiner = LLMScoreCombiner(
         es_weight=settings.ES_SCORE_WEIGHT_LLM,
         llm_weight=settings.LLM_SCORE_WEIGHT
     )
 
     # Создаем пайплайн
-    pipeline = LLMTenderProcessingPipeline(
+    return LLMTenderProcessingPipeline(
         term_extractor=term_extractor,
         es_client=es_client,
         llm_filter=llm_filter,
         score_combiner=score_combiner
     )
-
-    return pipeline
-
-
-def create_hybrid_pipeline() -> LLMTenderProcessingPipeline:
-    """Создает гибридный пайплайн с настраиваемой LLM моделью"""
-
-    # Можно выбрать разные модели
-    model_name = getattr(settings, 'LLM_MODEL', 'mistral:7b')
-
-    # Конфигурация LLM
-    llm_config = LLMConfig(
-        model_name=model_name,
-        temperature=0.1,  # Низкая температура для детерминированности
-        max_tokens=200,
-        timeout=30,
-        max_workers=4  # Параллельная обработка
-    )
-
-    return create_llm_pipeline(llm_config)

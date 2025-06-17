@@ -1,7 +1,3 @@
-"""
-Валидаторы для проверки корректности данных
-"""
-
 from typing import Dict, List, Any, Tuple
 
 
