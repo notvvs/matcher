@@ -11,7 +11,8 @@ class Settings:
 
     # Пути
     BASE_DIR = Path(__file__).parent.parent
-    DATA_DIR = BASE_DIR / 'data'
+    DATA_DIR = Path(os.getenv('DATA_DIR', str(BASE_DIR / 'data')))
+    LOG_DIR = Path(os.getenv('LOG_DIR', 'logs'))
 
     # Elasticsearch
     ELASTICSEARCH_HOST = os.getenv('ELASTICSEARCH_HOST', 'localhost')
@@ -20,28 +21,19 @@ class Settings:
     ELASTICSEARCH_TIMEOUT = int(os.getenv('ELASTICSEARCH_TIMEOUT', 30))
 
     # Поиск
-    MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', 2000))
+    MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', 50))
     MAX_FINAL_RESULTS = int(os.getenv('MAX_FINAL_RESULTS', 20))
     MIN_WEIGHT_THRESHOLD = float(os.getenv('MIN_WEIGHT_THRESHOLD', 1.0))
 
-    # Семантический поиск (оставляем для совместимости)
-    EMBEDDINGS_MODEL = os.getenv('EMBEDDINGS_MODEL', 'intfloat/multilingual-e5-base')
-    SEMANTIC_THRESHOLD = float(os.getenv('SEMANTIC_THRESHOLD', 0.35))
-    SEMANTIC_MAX_CANDIDATES = int(os.getenv('SEMANTIC_MAX_CANDIDATES', 500))
-    SEMANTIC_BATCH_SIZE = int(os.getenv('SEMANTIC_BATCH_SIZE', 64))
-
-    # Веса для комбинирования скоров (семантический подход)
-    ES_SCORE_WEIGHT = float(os.getenv('ES_SCORE_WEIGHT', 0.4))
-    SEMANTIC_SCORE_WEIGHT = float(os.getenv('SEMANTIC_SCORE_WEIGHT', 0.6))
-
     # LLM настройки
-    LLM_MODEL = os.getenv('LLM_MODEL', 'mistral:7b')
+    LLM_MODEL = os.getenv('LLM_MODEL', 'llama3.2:1b')
     LLM_API_URL = os.getenv('LLM_API_URL', 'http://localhost:11434/api/generate')
     LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', 0.1))
     LLM_MAX_TOKENS = int(os.getenv('LLM_MAX_TOKENS', 200))
-    LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', 30))
-    LLM_MAX_WORKERS = int(os.getenv('LLM_MAX_WORKERS', 4))
-    LLM_THRESHOLD = float(os.getenv('LLM_THRESHOLD', 0.7))
+    LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', 20))
+    LLM_MAX_WORKERS = int(os.getenv('LLM_MAX_WORKERS', 8))
+    LLM_BATCH_SIZE = int(os.getenv('LLM_BATCH_SIZE', 10))
+    LLM_THRESHOLD = float(os.getenv('LLM_THRESHOLD', 0.5))
 
     # Веса для LLM комбинирования
     ES_SCORE_WEIGHT_LLM = float(os.getenv('ES_SCORE_WEIGHT_LLM', 0.3))
@@ -76,16 +68,19 @@ class Settings:
 
     # Логирование
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_DIR = BASE_DIR / 'logs'
+
+    # API настройки
+    API_HOST = os.getenv('API_HOST', '0.0.0.0')
+    API_PORT = int(os.getenv('API_PORT', 8000))
+    API_RELOAD = os.getenv('API_RELOAD', 'True').lower() == 'true'
 
     # Режим отладки
-    DEBUG_MODE = os.getenv('DEBUG_MODE', 'True').lower() == 'true'
+    DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 
     # Файлы конфигурации
-    CONFIG_DIR = os.getenv('CONFIG_DIR', 'config')
-    STOPWORDS_FILE = os.getenv('STOPWORDS_FILE', str(DATA_DIR / 'stopwords.txt'))
-    SYNONYMS_FILE = os.getenv('SYNONYMS_FILE', str(DATA_DIR / 'synonyms.txt'))
-    IMPORTANT_CHARS_FILE = os.getenv('IMPORTANT_CHARS_FILE', str(DATA_DIR / 'important_chars.txt'))
+    STOPWORDS_FILE = os.getenv('STOPWORDS_FILE', 'stopwords.txt')
+    SYNONYMS_FILE = os.getenv('SYNONYMS_FILE', 'synonyms.txt')
+    IMPORTANT_CHARS_FILE = os.getenv('IMPORTANT_CHARS_FILE', 'important_chars.txt')
 
     @classmethod
     def get_elasticsearch_config(cls):

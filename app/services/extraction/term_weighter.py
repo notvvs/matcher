@@ -1,5 +1,4 @@
-from typing import Dict, List, Set, Tuple
-from collections import defaultdict
+from typing import Dict, List, Set
 
 from app.core.constants import TERM_WEIGHTS, RANGE_INDICATORS
 from app.core.synonyms import SynonymsManager

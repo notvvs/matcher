@@ -1,15 +1,14 @@
 from typing import List
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-import logging
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from datetime import datetime
 
 from app.models.api import (
     TenderRequest,
     TenderResponse,
     ItemResult,
-    ProcessingStats,
-    ErrorResponse
+    ProcessingStats
 )
+from app.core.settings import settings
 from app.pipeline.llm_factory import create_llm_pipeline
 from app.services.filtering.llm_filter import LLMConfig
 from app.utils.logger import setup_logger
@@ -26,13 +25,18 @@ def get_pipeline():
     global pipeline
     if pipeline is None:
         logger.info("Инициализация LLM пайплайна...")
+
+        # Все настройки берутся из settings
         llm_config = LLMConfig(
-            model_name="mistral:7b",
-            temperature=0.1,
-            max_tokens=300,
-            timeout=30,
-            max_workers=4
+            model_name=settings.LLM_MODEL,
+            api_url=settings.LLM_API_URL,
+            temperature=settings.LLM_TEMPERATURE,
+            max_tokens=settings.LLM_MAX_TOKENS,
+            timeout=settings.LLM_TIMEOUT,
+            max_workers=settings.LLM_MAX_WORKERS,
+            batch_size=settings.LLM_BATCH_SIZE
         )
+
         pipeline = create_llm_pipeline(llm_config)
     return pipeline
 
@@ -90,7 +94,7 @@ async def process_tender(
                             "category": product.get('category', ''),
                             "brand": product.get('brand'),
                             "elasticsearch_score": product.get('elasticsearch_score', 0.0),
-                            "semantic_score": product.get('llm_score', 0.0),  # Используем LLM скор
+                            "semantic_score": product.get('llm_score', 0.0),
                             "combined_score": product.get('combined_score', 0.0),
                             "attributes": product.get('attributes', [])
                         })
@@ -159,86 +163,6 @@ async def process_tender(
             status_code=500,
             detail=f"Ошибка обработки тендера: {str(e)}"
         )
-
-
-@router.post("/process_simple")
-async def process_simple_tender(tender_data: dict):
-    """
-    Упрощенный endpoint для обработки тендера
-
-    Принимает простой формат:
-    ```json
-    {
-        "name": "Блокнот",
-        "characteristics": [
-            {
-                "name": "Вид линовки",
-                "value": "Клетка",
-                "type": "Качественная",
-                "required": true
-            }
-        ]
-    }
-    ```
-    """
-    try:
-        # Валидация входных данных
-        if 'name' not in tender_data:
-            raise HTTPException(status_code=400, detail="Отсутствует поле 'name'")
-
-        if 'characteristics' not in tender_data or not tender_data['characteristics']:
-            raise HTTPException(status_code=400, detail="Отсутствуют характеристики")
-
-        # Получаем пайплайн
-        pipeline = get_pipeline()
-
-        # Обрабатываем
-        logger.info(f"Обработка простого тендера: {tender_data['name']}")
-        result = pipeline.process(tender_data)
-
-        # Формируем упрощенный ответ
-        if 'error' in result:
-            raise HTTPException(status_code=500, detail=result['error'])
-
-        products = []
-        if 'final_products' in result:
-            for product in result['final_products'][:10]:  # Топ-10
-                products.append({
-                    "id": product.get('id', ''),
-                    "title": product.get('title', ''),
-                    "category": product.get('category', ''),
-                    "brand": product.get('brand'),
-                    "combined_score": product.get('combined_score', 0.0),
-                    "llm_score": product.get('llm_score', 0.0),
-                    "llm_reasoning": product.get('llm_reasoning', ''),
-                    "key_attributes": [
-                        {
-                            "name": attr.get('attr_name'),
-                            "value": attr.get('attr_value')
-                        }
-                        for attr in product.get('attributes', [])[:5]
-                        if attr.get('attr_name') and attr.get('attr_value')
-                    ]
-                })
-
-        return {
-            "success": True,
-            "tender_name": tender_data['name'],
-            "products_found": len(products),
-            "products": products,
-            "processing_time": result.get('execution_time', 0),
-            "statistics": result.get('statistics', {})
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка обработки простого тендера: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка обработки: {str(e)}"
-        )
-
 
 def log_processing_result(tender_number: str, stats: ProcessingStats, success: bool):
     """Логирование результатов обработки в фоне"""

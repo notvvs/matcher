@@ -62,7 +62,8 @@ def create_llm_pipeline(llm_config: Optional[LLMConfig] = None) -> LLMTenderProc
             temperature=settings.LLM_TEMPERATURE,
             max_tokens=settings.LLM_MAX_TOKENS,
             timeout=settings.LLM_TIMEOUT,
-            max_workers=settings.LLM_MAX_WORKERS
+            max_workers=settings.LLM_MAX_WORKERS,
+            batch_size=settings.LLM_BATCH_SIZE  # Добавлено
         )
 
     llm_filter = LLMFilter(llm_config)
