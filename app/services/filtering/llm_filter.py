@@ -1,12 +1,10 @@
 import json
 import logging
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 import requests
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from app.core.settings import settings
 
 
 @dataclass
@@ -248,6 +246,7 @@ class LLMFilter:
 
                 # Парсим JSON ответ
                 try:
+                    # Очищаем ответ от возможных артефактов
                     llm_response = llm_response.strip()
                     if llm_response.startswith('```json'):
                         llm_response = llm_response[7:]

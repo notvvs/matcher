@@ -29,42 +29,15 @@ class Settings:
     LLM_MODEL = os.getenv('LLM_MODEL', 'llama3.2:1b')
     LLM_API_URL = os.getenv('LLM_API_URL', 'http://localhost:11434/api/generate')
     LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', 0.1))
-    LLM_MAX_TOKENS = int(os.getenv('LLM_MAX_TOKENS', 200))
-    LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', 20))
+    LLM_MAX_TOKENS = int(os.getenv('LLM_MAX_TOKENS', 1000))
+    LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', 30))
     LLM_MAX_WORKERS = int(os.getenv('LLM_MAX_WORKERS', 8))
-    LLM_BATCH_SIZE = int(os.getenv('LLM_BATCH_SIZE', 10))
+    LLM_BATCH_SIZE = int(os.getenv('LLM_BATCH_SIZE', 5))
     LLM_THRESHOLD = float(os.getenv('LLM_THRESHOLD', 0.5))
 
     # Веса для LLM комбинирования
     ES_SCORE_WEIGHT_LLM = float(os.getenv('ES_SCORE_WEIGHT_LLM', 0.3))
     LLM_SCORE_WEIGHT = float(os.getenv('LLM_SCORE_WEIGHT', 0.7))
-
-    # Веса для извлечения терминов
-    WEIGHTS = {
-        'required_values': {
-            'start': 4.0,
-            'step': 0.2,
-            'count': 5
-        },
-        'optional_values': {
-            'start': 2.5,
-            'step': 0.3,
-            'count': 3
-        },
-        'char_names': {
-            'start': 1.8,
-            'step': 0.2,
-            'count': 4
-        },
-        'synonym_penalty': 0.7,
-        'es_field_multipliers': {
-            'title': 2.5,
-            'category': 1.8,
-            'brand': 1.5,
-            'attr_value': 2.0,
-            'attr_name': 1.0
-        }
-    }
 
     # Логирование
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -78,9 +51,9 @@ class Settings:
     DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 
     # Файлы конфигурации
-    STOPWORDS_FILE = os.getenv('STOPWORDS_FILE', 'stopwords.txt')
-    SYNONYMS_FILE = os.getenv('SYNONYMS_FILE', 'synonyms.txt')
-    IMPORTANT_CHARS_FILE = os.getenv('IMPORTANT_CHARS_FILE', 'important_chars.txt')
+    STOPWORDS_FILE = 'stopwords.txt'
+    SYNONYMS_FILE = 'synonyms.txt'
+    IMPORTANT_CHARS_FILE = 'important_chars.txt'
 
     @classmethod
     def get_elasticsearch_config(cls):

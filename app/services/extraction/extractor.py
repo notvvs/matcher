@@ -1,14 +1,11 @@
 from typing import Dict, List, Set
 import logging
 
-from app.core.settings import settings
-from app.core.stopwords import StopwordsManager
 from app.core.synonyms import SynonymsManager
-from app.core.constants import IGNORE_VALUES
+from app.core.constants import IGNORE_VALUES, RANGE_INDICATORS
 from app.services.extraction.term_weighter import TermWeighter
 from app.services.extraction.text_cleaner import TextCleaner
 
-# Используем стандартный логгер
 logger = logging.getLogger(__name__)
 
 
@@ -30,27 +27,19 @@ class TermExtractor:
     def extract_from_tender(self, tender: Dict) -> Dict:
         """Главный метод извлечения терминов"""
 
-        logger.info(f"Начало извлечения терминов из тендера: {tender.get('name', '')}")
+        logger.info(f"Извлечение терминов из тендера: {tender.get('name', '')}")
 
         # 1. Извлекаем сырые термины
         raw_terms = self._extract_raw_terms(tender)
-        logger.info(f"Извлечено сырых терминов: название={len(raw_terms['name_terms'])}, "
-                    f"характеристики={len(raw_terms['char_names'])}, "
-                    f"значения={len(raw_terms['char_values'])}")
 
         # 2. Классифицируем термины
         classified = self._classify_terms(raw_terms)
-        logger.info(f"Классифицировано терминов: primary={len(classified['primary'])}, "
-                    f"secondary={len(classified['secondary'])}, "
-                    f"tertiary={len(classified['tertiary'])}")
 
         # 3. Расширяем синонимами
         expanded = self._expand_with_synonyms(classified)
-        logger.info("Термины расширены синонимами")
 
         # 4. Сохраняем оригинальные термины для определения синонимов
         original_terms = self._get_original_terms(tender)
-        logger.info(f"Оригинальных терминов: {len(original_terms)}")
 
         # 5. Рассчитываем веса
         boost_terms = self.term_weighter.calculate_weights(
@@ -58,26 +47,13 @@ class TermExtractor:
             expanded,
             original_terms
         )
-        logger.info(f"Рассчитаны веса для {len(boost_terms)} терминов")
 
         # 6. Формируем результат
         result = {
             'search_query': self._build_search_query(raw_terms),
             'boost_terms': boost_terms,
             'must_match_terms': expanded.get('primary', []),
-            'all_terms': self._get_all_terms(expanded),
-            'debug_info': {
-                'tender_name': tender.get('name', ''),
-                'required_characteristics': len([
-                    c for c in tender.get('characteristics', [])
-                    if c.get('required', False)
-                ]),
-                'optional_characteristics': len([
-                    c for c in tender.get('characteristics', [])
-                    if not c.get('required', False)
-                ]),
-                'boost_terms_count': len(boost_terms)
-            }
+            'all_terms': self._get_all_terms(expanded)
         }
 
         logger.info(f"Извлечение завершено. Поисковый запрос: '{result['search_query']}'")
@@ -141,8 +117,6 @@ class TermExtractor:
 
         for category, terms in classified.items():
             expanded[category] = self.synonyms_manager.expand_with_synonyms(terms)
-            if len(expanded[category]) > len(terms):
-                logger.info(f"Категория '{category}': добавлено {len(expanded[category]) - len(terms)} синонимов")
 
         return expanded
 
@@ -154,8 +128,6 @@ class TermExtractor:
 
     def _is_range_value(self, value: str) -> bool:
         """Проверяет, является ли значение диапазоном"""
-
-        from app.core.constants import RANGE_INDICATORS
         return any(indicator in str(value) for indicator in RANGE_INDICATORS)
 
     def _build_search_query(self, raw_terms: Dict[str, List[str]]) -> str:

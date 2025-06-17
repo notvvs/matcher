@@ -39,14 +39,12 @@ class LLMScoreCombiner:
             llm_score = product.get('llm_score', 0.0)
 
             # Нормализуем ES скор (обычно в диапазоне 0-100)
-            # Используем логарифмическую нормализацию для лучшего распределения
             if es_score > 0:
                 normalized_es_score = min(es_score / 20.0, 1.0)
             else:
                 normalized_es_score = 0.0
 
             # Комбинируем скоры
-            # LLM имеет больший вес, так как делает детальный анализ
             combined_score = (
                     self.es_weight * normalized_es_score +
                     self.llm_weight * llm_score
@@ -56,35 +54,14 @@ class LLMScoreCombiner:
             # Если LLM дал очень низкую оценку, снижаем итоговый скор
             if llm_score < 0.3:
                 combined_score *= 0.7  # Штраф 30%
-                self.logger.debug(
-                    f"Применен штраф для товара '{product.get('title', '')[:50]}...' "
-                    f"из-за низкого LLM скора: {llm_score:.3f}"
-                )
 
             # Если LLM дал высокую оценку, но ES низкий - это подозрительно
             if llm_score > 0.8 and normalized_es_score < 0.1:
                 combined_score *= 0.85  # Небольшой штраф
-                self.logger.debug(
-                    f"Подозрительное расхождение скоров для "
-                    f"'{product.get('title', '')[:50]}...': "
-                    f"ES={normalized_es_score:.3f}, LLM={llm_score:.3f}"
-                )
 
             # Сохраняем скоры
             product['normalized_es_score'] = normalized_es_score
             product['combined_score'] = round(combined_score, 4)
-
-            # Добавляем метаданные для отладки
-            product['score_metadata'] = {
-                'es_raw': es_score,
-                'es_normalized': normalized_es_score,
-                'llm': llm_score,
-                'combined': combined_score,
-                'weights': {
-                    'es': self.es_weight,
-                    'llm': self.llm_weight
-                }
-            }
 
         # Сортируем по комбинированному скору
         products.sort(key=lambda x: x['combined_score'], reverse=True)
